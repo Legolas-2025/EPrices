@@ -1,12 +1,21 @@
 # =============================================================================
-# ESPHome: EPrices v1.0
-#
-# ESP32 firmware that fetches day-ahead electricity spot prices from the
-# public Energy-Charts API (https://api.energy-charts.info) and exposes
-# them as Home Assistant sensors. No API token required.
+# ESPHome: EPrices v1.1
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.1 changes:
+# - Separate provider fee for negative spot prices (eprices_neg_prov_fee):
+#   positive prices: (raw / 1000) × (1 + prov_fee)     × (1 + vat_rate)
+#   negative prices: (raw / 1000) × (1 - neg_prov_fee) × (1 + vat_rate)
+#   switch happens on raw API price before any multiplier is applied
+#   VAT applied to both cases (consistent with net billing + end-of-month VAT)
+#   0.30 = provider keeps 30%, pays you 70% of negative price
+#   0.00 = provider passes full negative price to you (no fee)
+# - New substitution: neg_prov_fee_value (!secret eprices_neg_prov_fee)
+# - New global: neg_prov_fee (double)
+# - MULT split into MULT_POS / MULT_NEG in parse_energy_charts_today_script
+#   and parse_energy_charts_tomorrow_script
 #
 # v1.0 release notes:
 # - Fetches 15-min and hourly spot prices for today and tomorrow
@@ -40,9 +49,10 @@
 # =============================================================================
 
 substitutions:
-  country_bzn_value: !secret eprices_country_bzn
-  prov_fee_value:    !secret eprices_prov_fee
-  vat_rate_value:    !secret eprices_vat_rate
+  country_bzn_value:    !secret eprices_country_bzn
+  prov_fee_value:       !secret eprices_prov_fee
+  vat_rate_value:       !secret eprices_vat_rate
+  neg_prov_fee_value:   !secret eprices_neg_prov_fee
 
 esphome:
   name: eprices
@@ -497,6 +507,9 @@ globals:
   - id: vat_rate
     type: double
     initial_value: '${vat_rate_value}'
+  - id: neg_prov_fee
+    type: double
+    initial_value: '${neg_prov_fee_value}'
 
   # --- Pre-computed fetch URLs (url: !lambda not supported in scripts) ---
   - id: fetch_url_today
@@ -1261,7 +1274,8 @@ script:
       raw_body: string
     then:
       - lambda: |-
-          const double MULT = (1.0 + id(prov_fee)) * (1.0 + id(vat_rate));
+          const double MULT_POS = (1.0 + id(prov_fee))     * (1.0 + id(vat_rate));
+          const double MULT_NEG = (1.0 - id(neg_prov_fee)) * (1.0 + id(vat_rate));
 
           id(price_values_today).clear();
           id(price_timestamps_today).clear();
@@ -1350,7 +1364,7 @@ script:
             if (end1 == ts_toks[i].c_str() || end2 == prc_toks[i].c_str()) continue;
             if (unix_ts <= 0) continue;
 
-            float eur_kwh = (float)((double)raw_mwh * MULT / 1000.0);
+            float eur_kwh = (float)((double)raw_mwh * (raw_mwh >= 0 ? MULT_POS : MULT_NEG) / 1000.0);
             id(price_timestamps_today).push_back(unix_ts);
             id(price_values_today).push_back(eur_kwh);
           }
@@ -1369,7 +1383,8 @@ script:
       raw_body: string
     then:
       - lambda: |-
-          const double MULT = (1.0 + id(prov_fee)) * (1.0 + id(vat_rate));
+          const double MULT_POS = (1.0 + id(prov_fee))     * (1.0 + id(vat_rate));
+          const double MULT_NEG = (1.0 - id(neg_prov_fee)) * (1.0 + id(vat_rate));
 
           id(price_values_tomorrow).clear();
           id(price_timestamps_tomorrow).clear();
@@ -1437,7 +1452,7 @@ script:
             if (end1 == ts_toks[i].c_str() || end2 == prc_toks[i].c_str()) continue;
             if (unix_ts <= 0) continue;
 
-            float eur_kwh = (float)((double)raw_mwh * MULT / 1000.0);
+            float eur_kwh = (float)((double)raw_mwh * (raw_mwh >= 0 ? MULT_POS : MULT_NEG) / 1000.0);
             id(price_timestamps_tomorrow).push_back(unix_ts);
             id(price_values_tomorrow).push_back(eur_kwh);
           }
