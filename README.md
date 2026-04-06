@@ -22,7 +22,8 @@ Assistant automations are required for any core functionality.
   for use in HA automations and dashboards
 - **NVS persistence** — prices survive device reboots without re-fetching
 - **Midnight bridge** — tomorrow's data automatically becomes today at 00:00, fully on-device
-- **Auto-retry logic** — up to 8 HTTP fetch attempts for both today and tomorrow
+- **Auto-retry logic** — up to 8 HTTP fetch attempts for both today and tomorrow,
+  with a **120-second stuck-fetch watchdog** that unblocks retries after TCP-level stalls
 - **DST-safe** — uses UNIX timestamps and binary search throughout, no hour-slot arithmetic
 - **Staleness detection** — `Today Current Price Status` shows `Stale` if stored date mismatches today
 - **Tomorrow live sensors** evaluate at `now + 86400s` — reflecting tomorrow at the same local time
@@ -132,6 +133,18 @@ For the full list see the [Energy-Charts API documentation](https://api.energy-c
 | 13:25 | First auto-fetch attempt for tomorrow |
 | 13:55, 14:55 … 19:55 | Retry tomorrow fetch if previous attempt failed (max 8 total) |
 | Manual button press | Force immediate fetch for today or tomorrow |
+
+### Stuck-fetch watchdog
+
+If an HTTP request stalls at the TCP level (connection accepted but data
+delivery suspended), the 25 s application timeout may not fire. In that case
+the `is_updating_*` flag can stay `true` for several minutes, blocking all
+subsequent retries and manual button presses.
+
+The worker loop checks every 10 seconds: if `is_updating_today` or
+`is_updating_tomorrow` has been `true` for more than **120 seconds**, the flag
+is force-cleared and the status message is set to `"Fetch timeout – will retry"`.
+The next scheduled trigger or manual press then proceeds normally.
 
 ### Price calculation
 
@@ -259,7 +272,7 @@ safe on DST transition days (23-hour and 25-hour days).
 | Today Price Update Status | `sensor.eprices_today_price_update_status` | `SUCCESS` / `FAILED/WAITING` |
 | Tomorrow Price Update Status | `sensor.eprices_tomorrow_price_update_status` | `SUCCESS` / `FAILED/WAITING` |
 | Today Price Update Status Message | `sensor.eprices_today_price_update_status_message` | Detailed status string |
-| Tomorrow Price Update Status Message | `sensor.eprices_tomorrow_price_update_status_message` | Detailed status string |
+| Tomorrow Price Update Status Message | `sensor.eprices_tomorrow_price_update_status_message` | Detailed status string; `"Fetch timeout – will retry"` after watchdog trigger |
 
 ### Buttons
 
