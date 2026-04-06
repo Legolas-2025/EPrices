@@ -1,4 +1,50 @@
-# EPrices v1.0 – Changelog
+# EPrices – Changelog
+
+## v1.1 — 2026-04-06
+
+### Negative price provider fee support
+
+Added a separate provider fee multiplier for negative spot prices, configurable
+via `secrets.yaml`. This correctly models contracts where the provider fee
+structure differs between positive and negative market prices.
+
+**New secret key:**
+
+```yaml
+eprices_neg_prov_fee: "0.30"
+```
+
+**New global:** `neg_prov_fee` (type: `double`)
+
+**Price calculation is now:**
+
+| Market price | Formula |
+|---|---|
+| Positive (`raw_mwh >= 0`) | `(raw / 1000) × (1 + prov_fee) × (1 + vat_rate)` |
+| Negative (`raw_mwh < 0`) | `(raw / 1000) × (1 - neg_prov_fee) × (1 + vat_rate)` |
+
+**Key values for `eprices_neg_prov_fee`:**
+
+| Value | Meaning |
+|---|---|
+| `"0.30"` | Provider keeps 30%, pays you 70% of negative price |
+| `"0.00"` | Provider passes full negative price to you (no fee) |
+
+**Switch point:** raw API price (`raw_mwh`) before any multiplier is applied.
+
+**VAT:** applied symmetrically to both positive and negative prices, consistent
+with net billing models where VAT is calculated on the monthly net sum
+(mathematically equivalent due to VAT being a linear multiplier).
+
+**Changed files:** `eprices.yaml`, `secrets.yaml`
+
+**Changed locations in `eprices.yaml`:**
+- `substitutions:` — added `neg_prov_fee_value`
+- `globals:` — added `neg_prov_fee`
+- `parse_energy_charts_today_script` — `MULT` split into `MULT_POS` / `MULT_NEG`
+- `parse_energy_charts_tomorrow_script` — `MULT` split into `MULT_POS` / `MULT_NEG`
+
+---
 
 ## v1.0 — 2026-04-05
 
