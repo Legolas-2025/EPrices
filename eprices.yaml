@@ -1,8 +1,19 @@
 # =============================================================================
-# ESPHome: EPrices v1.2
+# ESPHome: EPrices v1.2.1
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.2.1 changes (2026-04-07):
+# - CONFIG_ESP_MAIN_TASK_STACK_SIZE raised from 8192 to 16384 bytes via
+#   esp32: framework: sdkconfig_options — eliminates stack overflow scenario
+#   observed in production during simultaneous NVS load + HTTP fetch/parse
+# - Price vectors pre-allocated at boot with .reserve(96) in on_boot lambda:
+#   price_timestamps_today, price_values_today,
+#   price_timestamps_tomorrow, price_values_tomorrow
+#   prevents repeated heap reallocation during NVS load and HTTP parse cycles
+# - Hourly JSON sensors now publish "" when cleared (was "[]") —
+#   consistent with all six 15-min JSON sensors
 #
 # v1.2 changes (2026-04-06):
 # - HTTP fetch stuck-flag watchdog (120 s) added to today and tomorrow workers:
@@ -86,11 +97,19 @@ esphome:
           } else {
             id(boot_time) = 0;
           }
+          // Pre-allocate price vectors to avoid repeated heap reallocation
+          // during NVS load and HTTP fetch/parse cycles
+          id(price_timestamps_today).reserve(96);
+          id(price_values_today).reserve(96);
+          id(price_timestamps_tomorrow).reserve(96);
+          id(price_values_tomorrow).reserve(96);
 
 esp32:
   board: esp32dev
   framework:
     type: esp-idf
+    sdkconfig_options:
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
     # No include_builtin_idf_components needed — nvs headers are always
     # available in esp-idf framework; eprices_nvs.h includes them directly.
 
@@ -2103,7 +2122,7 @@ script:
           id(today_current_max_hourly_price_percentage).publish_state(NAN);
           id(last_update_success) = false;
           id(update_status_message) = "Cleared – awaiting NVS or HTTP";
-          id(json_hourly_prices_kwh).publish_state("[]");
+          id(json_hourly_prices_kwh).publish_state("");
           id(json_15min_prices_kwh_p1_00_00_07_45).publish_state("");
           id(json_15min_prices_kwh_p2_08_00_15_45).publish_state("");
           id(json_15min_prices_kwh_p3_16_00_23_45).publish_state("");
@@ -2136,7 +2155,7 @@ script:
           id(tomorrow_min_hourly_price).publish_state(NAN);
           id(tomorrow_max_hourly_price).publish_state(NAN);
           id(tomorrow_current_max_hourly_price_percentage).publish_state(NAN);
-          id(json_tomorrow_hourly_prices_kwh).publish_state("[]");
+          id(json_tomorrow_hourly_prices_kwh).publish_state("");
           id(json_tomorrow_15min_prices_kwh_p1_00_00_07_45).publish_state("");
           id(json_tomorrow_15min_prices_kwh_p2_08_00_15_45).publish_state("");
           id(json_tomorrow_15min_prices_kwh_p3_16_00_23_45).publish_state("");
