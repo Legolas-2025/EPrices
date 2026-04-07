@@ -39,6 +39,12 @@ Assistant automations are required for any core functionality.
 - **ESP32** development board (tested on `esp32dev`)
 - ESPHome with **`esp-idf` framework** (required for NVS flash support)
 
+> **Note on ESP32 variants:** EPrices is compiled and tested on the original
+> dual-core ESP32 (`esp32dev`). It also runs on ESP32-S3 with a one-line board
+> change. Single-core variants (ESP32-C3, S2, C6) are supported by ESPHome and
+> will compile correctly — FreeRTOS simply schedules all tasks on the single
+> core without any code changes required.
+
 ---
 
 ## Files
@@ -210,10 +216,10 @@ safe on DST transition days (23-hour and 25-hour days).
 
 | Sensor | Entity ID | Description |
 |---|---|---|
-| Today JSON Hourly Prices EUR⁄kWh | `sensor.eprices_today_json_hourly_prices_eur_kwh` | JSON array of 24 hourly averages |
-| Today JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array of 32 prices |
-| Today JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array of 32 prices |
-| Today JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array of 32 prices |
+| Today JSON Hourly Prices EUR⁄kWh | `sensor.eprices_today_json_hourly_prices_eur_kwh` | JSON array of 24 hourly averages; `""` when no data |
+| Today JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array of 32 prices; `""` when no data |
+| Today JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array of 32 prices; `""` when no data |
+| Today JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array of 32 prices; `""` when no data |
 | Today Highest Price Time | `sensor.eprices_today_highest_price_time` | Time of highest 15-min price (HH:MM) |
 | Today Lowest Price Time | `sensor.eprices_today_lowest_price_time` | Time of lowest 15-min price (HH:MM) |
 | Today Highest Hourly Price Time | `sensor.eprices_today_highest_hourly_price_time` | Time of highest hourly average (HH:00) |
@@ -240,10 +246,10 @@ safe on DST transition days (23-hour and 25-hour days).
 
 | Sensor | Entity ID | Description |
 |---|---|---|
-| Tomorrow JSON Hourly Prices EUR⁄kWh | `sensor.eprices_tomorrow_json_hourly_prices_eur_kwh` | JSON array of 24 hourly averages |
-| Tomorrow JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array of 32 prices |
-| Tomorrow JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array of 32 prices |
-| Tomorrow JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array of 32 prices |
+| Tomorrow JSON Hourly Prices EUR⁄kWh | `sensor.eprices_tomorrow_json_hourly_prices_eur_kwh` | JSON array of 24 hourly averages; `""` when no data |
+| Tomorrow JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array of 32 prices; `""` when no data |
+| Tomorrow JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array of 32 prices; `""` when no data |
+| Tomorrow JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array of 32 prices; `""` when no data |
 | Tomorrow Highest Price Time | `sensor.eprices_tomorrow_highest_price_time` | Time of highest 15-min price (HH:MM) |
 | Tomorrow Lowest Price Time | `sensor.eprices_tomorrow_lowest_price_time` | Time of lowest 15-min price (HH:MM) |
 | Tomorrow Highest Hourly Price Time | `sensor.eprices_tomorrow_highest_hourly_price_time` | Time of highest hourly average (HH:00) |
