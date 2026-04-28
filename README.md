@@ -24,6 +24,9 @@ Assistant automations are required for any core functionality.
 - **Midnight bridge** — tomorrow's data automatically becomes today at 00:00, fully on-device
 - **Auto-retry logic** — up to 8 HTTP fetch attempts for both today and tomorrow,
   with a **120-second stuck-fetch watchdog** that unblocks retries after TCP-level stalls
+- **Task watchdog stability** — watchdog timeout increased to 40s, idle task checking disabled;
+  periodic `yield()` calls and optimised JSON building prevent spontaneous reboots during
+  heavy parsing when full price data arrives (~13:55)
 - **DST-safe** — uses UNIX timestamps and binary search throughout, no hour-slot arithmetic
 - **Staleness detection** — `Today Current Price Status` shows `Stale` if stored date mismatches today
 - **Tomorrow live sensors** evaluate at `now + 86400s` — reflecting tomorrow at the same local time
