@@ -1,5 +1,109 @@
 # EPrices – Changelog
 
+## v1.2.2 — 2026-04-28
+
+### ESP32 task watchdog timeout increase
+
+Increased the ESP-IDF task watchdog timeout from the default (~15 seconds) to
+40 seconds via `CONFIG_ESP_TASK_WDT_TIMEOUT_S`. Additionally disabled idle task
+watchdog checking on both CPU cores via `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0`
+and `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1`.
+
+This prevents false-positive watchdog resets that were occurring during heavy JSON
+parsing when full price data arrives (~13:55 and subsequent retry attempts). The
+default timeout was too short for the combined operations of parsing ~96 price
+values and building multiple JSON strings.
+
+**Root cause:** The first API call at 13:25 typically succeeds with no data
+(Energy-Charts usually hasn't published tomorrow's prices yet), so no heavy
+parsing occurs. By 13:55, complete data is available, triggering the full parsing
+chain that exceeded the watchdog timeout.
+
+**Changed location in `eprices.yaml`:**
+- `esp32: framework: sdkconfig_options:` — added
+  - `CONFIG_ESP_TASK_WDT_TIMEOUT_S: "40"`
+  - `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0: n`
+  - `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1: n`
+
+---
+
+### JSON string building optimised — eliminated O(n²) heap fragmentation
+
+Replaced the O(n²) string concatenation pattern in `recompute_today` and
+`recompute_tomorrow` with pre-allocated fixed-size character buffers using
+`snprintf()`. Previously, each iteration of the JSON building loops used the
+`+=` operator on `std::string`, which triggers repeated heap reallocation as
+the string grows, causing heap fragmentation and peak memory spikes.
+
+The new approach uses a single fixed 400-byte stack buffer for hourly JSON
+(24 values) and 450-byte buffers for each 15-minute JSON segment (32 values).
+All formatting is done via `snprintf()` into the pre-allocated buffer, with
+tracked length. This eliminates all heap allocations during JSON building.
+
+**Before (problematic):**
+```cpp
+std::string json_h = "[";
+for (int i = 0; i < 24; i++) {
+    // ...
+    json_h += pb;  // Each += may trigger reallocation!
+}
+```
+
+**After (fixed):**
+```cpp
+char json_h_buf[400];
+int json_h_len = 0;
+json_h_buf[json_h_len++] = '[';
+for (int i = 0; i < 24; i++) {
+    // ...
+    int written = snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "%.4f", ha);
+    json_h_len += written;
+}
+```
+
+**Changed locations in `eprices.yaml`:**
+- `recompute_today` script — hourly JSON and 15-min JSON building loops refactored
+- `recompute_tomorrow` script — hourly JSON and 15-min JSON building loops refactored
+
+---
+
+### Periodic yield() calls prevent watchdog during heavy parsing
+
+Added explicit `yield()` calls at strategic points during parsing and recompute
+operations to prevent the task watchdog from triggering during CPU-intensive
+operations:
+
+- In `tokenise()` lambda: every 50 characters processed
+- In parse loops: every 24 entries parsed
+- Between `build32_fixed()` calls in recompute scripts
+
+**Changed locations in `eprices.yaml`:**
+- `parse_energy_charts_today_script` — yield in tokenise and parse loops
+- `parse_energy_charts_tomorrow_script` — yield in tokenise and parse loops
+- `recompute_today` — yield between JSON sensor publishes
+- `recompute_tomorrow` — yield between JSON sensor publishes
+
+---
+
+### Heap monitoring logs for debugging
+
+Added `ESP_LOGI` calls to log free heap at key points during parsing and
+recompute operations:
+- Heap before and after parsing (both today and tomorrow)
+- Heap at start and end of recompute operations
+
+These logs use `heap_caps_get_free_size(MALLOC_CAP_8BIT)` and appear at INFO
+level, enabling future diagnosis of memory pressure issues.
+
+**Changed locations in `eprices.yaml`:**
+- `on_boot` lambda — added boot heap log
+- `parse_energy_charts_today_script` — heap before/after parsing
+- `parse_energy_charts_tomorrow_script` — heap before/after parsing
+- `recompute_today` — heap at start/end
+- `recompute_tomorrow` — heap at start/end
+
+---
+
 ## v1.2.1 — 2026-04-07
 
 ### ESP32 main task stack size increase
