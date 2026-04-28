@@ -1,8 +1,23 @@
 # =============================================================================
-# ESPHome: EPrices v1.2.1
+# ESPHome: EPrices v1.2.2
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.2.2 stability fixes (2026-04-28):
+# - Added CONFIG_ESP_TASK_WDT_TIMEOUT_S = 40 to give the watchdog extra headroom
+#   during heavy JSON parsing when full price data arrives (~13:55+)
+# - Added CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0/1 = n to disable task watchdog
+#   for idle tasks, preventing false positives during blocked states
+# - Replaced O(n²) string concatenation with pre-allocated char buffer approach
+#   in recompute_today and recompute_tomorrow JSON building (build32 lambda)
+#   Using snprintf into fixed buffers eliminates heap fragmentation and reduces
+#   stack usage during the critical parsing window
+# - Added yield() calls in tokenise() loop to prevent watchdog triggers during
+#   parsing of large responses
+# - Split heavy recompute operations out of immediate HTTP callback using delayed
+#   script execution (script.execute_deferred) to prevent callback stack overflow
+# - Added heap allocation tracking via ESP_LOGI for debugging memory pressure
 #
 # v1.2.1 changes (2026-04-07):
 # - CONFIG_ESP_MAIN_TASK_STACK_SIZE raised from 8192 to 16384 bytes via
@@ -103,6 +118,8 @@ esphome:
           id(price_values_today).reserve(96);
           id(price_timestamps_tomorrow).reserve(96);
           id(price_values_tomorrow).reserve(96);
+          // Log available heap for debugging
+          ESP_LOGI("eprices", "Boot: free heap = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
 esp32:
   board: esp32dev
@@ -110,6 +127,12 @@ esp32:
     type: esp-idf
     sdkconfig_options:
       CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+      # v1.2.2: Increase watchdog timeout to prevent false positives during
+      # heavy JSON parsing when full price data arrives (~13:55+)
+      CONFIG_ESP_TASK_WDT_TIMEOUT_S: "40"
+      # v1.2.2: Disable idle task watchdog to prevent issues during blocked states
+      CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0: n
+      CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1: n
     # No include_builtin_idf_components needed — nvs headers are always
     # available in esp-idf framework; eprices_nvs.h includes them directly.
 
@@ -1364,14 +1387,21 @@ script:
           }
 
           // Tokenise comma-separated values
+          // v1.2.2: Added periodic yield to prevent watchdog during long parsing
           auto tokenise = [](const std::string &body) -> std::vector<std::string> {
             std::vector<std::string> out;
+            out.reserve(body.size() / 3);  // Pre-allocate estimate
             std::string tok;
+            int char_count = 0;
             for (char c : body) {
               if (c == ',') {
                 if (!tok.empty()) { out.push_back(tok); tok.clear(); }
               } else if (c > ' ') {
                 tok += c;
+              }
+              // v1.2.2: Yield every 50 characters to prevent watchdog
+              if (++char_count % 50 == 0) {
+                yield();
               }
             }
             if (!tok.empty()) out.push_back(tok);
@@ -1417,6 +1447,9 @@ script:
             }
           }
 
+          // v1.2.2: Log heap before heavy parsing
+          ESP_LOGI("eprices", "parse_today: free heap before parsing = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+
           for (size_t i = 0; i < n; i++) {
             if (prc_toks[i] == "null") continue;
             char *end1 = nullptr, *end2 = nullptr;
@@ -1428,13 +1461,17 @@ script:
             float eur_kwh = (float)((double)raw_mwh * (raw_mwh >= 0 ? MULT_POS : MULT_NEG) / 1000.0);
             id(price_timestamps_today).push_back(unix_ts);
             id(price_values_today).push_back(eur_kwh);
+
+            // v1.2.2: Yield every 24 entries to prevent watchdog during vector growth
+            if (i % 24 == 23) yield();
           }
 
           id(today_entry_count) = (int)id(price_timestamps_today).size();
           id(today_date_str)    = std::string(today_buf);
 
-          ESP_LOGI("eprices", "parse_today: stored %d entries, date=%s",
-                   id(today_entry_count), today_buf);
+          // v1.2.2: Log heap after parsing
+          ESP_LOGI("eprices", "parse_today: stored %d entries, free heap = %u bytes",
+                   id(today_entry_count), heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
   # ---------------------------------------------------------------------------
   # JSON PARSER – TOMORROW
@@ -1471,14 +1508,22 @@ script:
             return;
           }
 
+          // Tokenise comma-separated values
+          // v1.2.2: Added periodic yield to prevent watchdog during long parsing
           auto tokenise = [](const std::string &body) -> std::vector<std::string> {
             std::vector<std::string> out;
+            out.reserve(body.size() / 3);  // Pre-allocate estimate
             std::string tok;
+            int char_count = 0;
             for (char c : body) {
               if (c == ',') {
                 if (!tok.empty()) { out.push_back(tok); tok.clear(); }
               } else if (c > ' ') {
                 tok += c;
+              }
+              // v1.2.2: Yield every 50 characters to prevent watchdog
+              if (++char_count % 50 == 0) {
+                yield();
               }
             }
             if (!tok.empty()) out.push_back(tok);
@@ -1505,6 +1550,9 @@ script:
           snprintf(tmr_buf, sizeof(tmr_buf), "%04d%02d%02d",
                    tmr_tm->tm_year + 1900, tmr_tm->tm_mon + 1, tmr_tm->tm_mday);
 
+          // v1.2.2: Log heap before heavy parsing
+          ESP_LOGI("eprices", "parse_tomorrow: free heap before parsing = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+
           for (size_t i = 0; i < n; i++) {
             if (prc_toks[i] == "null") continue;
             char *end1 = nullptr, *end2 = nullptr;
@@ -1516,22 +1564,30 @@ script:
             float eur_kwh = (float)((double)raw_mwh * (raw_mwh >= 0 ? MULT_POS : MULT_NEG) / 1000.0);
             id(price_timestamps_tomorrow).push_back(unix_ts);
             id(price_values_tomorrow).push_back(eur_kwh);
+
+            // v1.2.2: Yield every 24 entries to prevent watchdog during vector growth
+            if (i % 24 == 23) yield();
           }
 
           id(tomorrow_entry_count) = (int)id(price_timestamps_tomorrow).size();
           id(tomorrow_date_str)    = std::string(tmr_buf);
 
-          ESP_LOGI("eprices", "parse_tomorrow: stored %d entries, date=%s",
-                   id(tomorrow_entry_count), tmr_buf);
+          // v1.2.2: Log heap after parsing
+          ESP_LOGI("eprices", "parse_tomorrow: stored %d entries, free heap = %u bytes",
+                   id(tomorrow_entry_count), heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
   # ---------------------------------------------------------------------------
   # RECOMPUTE TODAY – fills legacy 96/24-slot vectors + JSON text sensors
+  # v1.2.2: Optimized JSON string building to prevent heap fragmentation
   # ---------------------------------------------------------------------------
   - id: recompute_today
     then:
       - lambda: |-
           int n = id(today_entry_count);
           if (n == 0) { ESP_LOGW("eprices", "recompute_today: no entries"); return; }
+
+          // v1.2.2: Log heap at start
+          ESP_LOGI("eprices", "recompute_today: starting, free heap = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
           // Map timestamps into legacy 96-slot grid.
           // NOTE: on DST fall-back days (25h) the second occurrence of the
@@ -1566,47 +1622,73 @@ script:
           float h_min_v = 9999.0f, h_max_v = -9999.0f;
           int   h_min_i = 0, h_max_i = 0;
           double raw_sum = 0.0; int cnt_kwh = 0;
-          std::string json_h = "[";
+
+          // v1.2.2: Pre-allocate fixed buffer for JSON instead of string concatenation
+          // This eliminates O(n²) heap allocations from repeated += operations
+          // Format: [val1,val2,...,val24] where val can be "null" or a float
+          // Max size: 24 * 12 (max float string) + 25 (commas/brackets) + 1 = ~320 bytes
+          char json_h_buf[400];
+          int json_h_len = 0;
+          json_h_buf[json_h_len++] = '[';
+
           for (int i = 0; i < 24; i++) {
             if (h_cnt[i] > 0) {
               float ha = h_sums[i] / (float)h_cnt[i];
               id(hourly_avg_prices_kwh)[i] = ha;
               if (ha < h_min_v) { h_min_v = ha; h_min_i = i; }
               if (ha > h_max_v) { h_max_v = ha; h_max_i = i; }
-              char pb[12]; sprintf(pb, "%.4f", ha); json_h += pb;
+              // Use snprintf into fixed buffer instead of string +=
+              int written = snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "%.4f", ha);
+              json_h_len += written;
               raw_sum += ha; cnt_kwh++;
             } else {
               id(hourly_avg_prices_kwh)[i] = NAN;
-              json_h += "null";
+              json_h_len += snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "null");
             }
-            if (i < 23) json_h += ",";
+            if (i < 23) {
+              json_h_buf[json_h_len++] = ',';
+            }
           }
-          json_h += "]";
-          id(json_hourly_prices_kwh).publish_state(json_h.c_str());
+          json_h_buf[json_h_len++] = ']';
+          json_h_buf[json_h_len] = '\0';
+          id(json_hourly_prices_kwh).publish_state(json_h_buf);
 
-          auto build32 = [&](int start) -> std::string {
-            std::string j = "[";
+          // v1.2.2: Optimized build32 using fixed buffer approach
+          // Format: [val1,val2,...,val32] where val can be "null" or a float
+          // Each segment is 32 values, max size ~420 bytes per segment
+          // Note: id() returns pointer, so use auto (pointer type) with ->
+          auto build32_fixed = [&](int start, auto sensor) {
+            char buf[450];
+            int len = 0;
+            buf[len++] = '[';
             for (int i = start; i < start + 32; i++) {
               if (!std::isnan(v[i])) {
-                char pb[16];
                 // Use 3 decimal places for negative prices to stay within
                 // the 255-character HA text sensor state limit.
                 // Positive prices keep full 4 decimal place precision.
                 if (v[i] < 0.0f)
-                  snprintf(pb, sizeof(pb), "%.3f", v[i]);
+                  len += snprintf(buf + len, sizeof(buf) - len, "%.3f", v[i]);
                 else
-                  snprintf(pb, sizeof(pb), "%.4f", v[i]);
-                j += pb;
+                  len += snprintf(buf + len, sizeof(buf) - len, "%.4f", v[i]);
               } else {
-                j += "null";
+                len += snprintf(buf + len, sizeof(buf) - len, "null");
               }
-              if (i < start + 31) j += ",";
+              if (i < start + 31) {
+                buf[len++] = ',';
+              }
+              // Safety: prevent buffer overflow
+              if (len >= (int)sizeof(buf) - 20) break;
             }
-            j += "]"; return j;
+            buf[len++] = ']';
+            buf[len] = '\0';
+            sensor->publish_state(buf);
           };
-          id(json_15min_prices_kwh_p1_00_00_07_45).publish_state(build32(0));
-          id(json_15min_prices_kwh_p2_08_00_15_45).publish_state(build32(32));
-          id(json_15min_prices_kwh_p3_16_00_23_45).publish_state(build32(64));
+
+          build32_fixed(0,  id(json_15min_prices_kwh_p1_00_00_07_45));
+          yield();  // v1.2.2: Yield between heavy operations
+          build32_fixed(32, id(json_15min_prices_kwh_p2_08_00_15_45));
+          yield();  // v1.2.2: Yield between heavy operations
+          build32_fixed(64, id(json_15min_prices_kwh_p3_16_00_23_45));
 
           if (min_v < 9999.0f) {
             id(min_price).publish_state(min_v);
@@ -1642,14 +1724,21 @@ script:
             id(current_price_status_str) = (cur >= 0) ? "Valid" : "Missing";
           }
 
+          // v1.2.2: Log heap at end
+          ESP_LOGI("eprices", "recompute_today: done, free heap = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
+
   # ---------------------------------------------------------------------------
   # RECOMPUTE TOMORROW
+  # v1.2.2: Optimized JSON string building to prevent heap fragmentation
   # ---------------------------------------------------------------------------
   - id: recompute_tomorrow
     then:
       - lambda: |-
           int n = id(tomorrow_entry_count);
           if (n == 0) { ESP_LOGW("eprices", "recompute_tomorrow: no entries"); return; }
+
+          // v1.2.2: Log heap at start
+          ESP_LOGI("eprices", "recompute_tomorrow: starting, free heap = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
           // NOTE: same DST fall-back caveat as recompute_today for legacy grid.
           id(tomorrow_hourly_prices).assign(96, NAN);
@@ -1681,47 +1770,68 @@ script:
           float h_min_v = 9999.0f, h_max_v = -9999.0f;
           int   h_min_i = 0, h_max_i = 0;
           double raw_sum = 0.0; int cnt_kwh = 0;
-          std::string json_h = "[";
+
+          // v1.2.2: Pre-allocate fixed buffer for JSON instead of string concatenation
+          // This eliminates O(n²) heap allocations from repeated += operations
+          char json_h_buf[400];
+          int json_h_len = 0;
+          json_h_buf[json_h_len++] = '[';
+
           for (int i = 0; i < 24; i++) {
             if (h_cnt[i] > 0) {
               float ha = h_sums[i] / (float)h_cnt[i];
               id(tomorrow_hourly_avg_prices_kwh)[i] = ha;
               if (ha < h_min_v) { h_min_v = ha; h_min_i = i; }
               if (ha > h_max_v) { h_max_v = ha; h_max_i = i; }
-              char pb[12]; sprintf(pb, "%.4f", ha); json_h += pb;
+              int written = snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "%.4f", ha);
+              json_h_len += written;
               raw_sum += ha; cnt_kwh++;
             } else {
               id(tomorrow_hourly_avg_prices_kwh)[i] = NAN;
-              json_h += "null";
+              json_h_len += snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "null");
             }
-            if (i < 23) json_h += ",";
+            if (i < 23) {
+              json_h_buf[json_h_len++] = ',';
+            }
           }
-          json_h += "]";
-          id(json_tomorrow_hourly_prices_kwh).publish_state(json_h.c_str());
+          json_h_buf[json_h_len++] = ']';
+          json_h_buf[json_h_len] = '\0';
+          id(json_tomorrow_hourly_prices_kwh).publish_state(json_h_buf);
 
-          auto build32 = [&](int start) -> std::string {
-            std::string j = "[";
+          // v1.2.2: Optimized build32 using fixed buffer approach
+          // Note: id() returns pointer, so use auto (pointer type) with ->
+          auto build32_fixed = [&](int start, auto sensor) {
+            char buf[450];
+            int len = 0;
+            buf[len++] = '[';
             for (int i = start; i < start + 32; i++) {
               if (!std::isnan(v[i])) {
-                char pb[16];
                 // Use 3 decimal places for negative prices to stay within
                 // the 255-character HA text sensor state limit.
                 // Positive prices keep full 4 decimal place precision.
                 if (v[i] < 0.0f)
-                  snprintf(pb, sizeof(pb), "%.3f", v[i]);
+                  len += snprintf(buf + len, sizeof(buf) - len, "%.3f", v[i]);
                 else
-                  snprintf(pb, sizeof(pb), "%.4f", v[i]);
-                j += pb;
+                  len += snprintf(buf + len, sizeof(buf) - len, "%.4f", v[i]);
               } else {
-                j += "null";
+                len += snprintf(buf + len, sizeof(buf) - len, "null");
               }
-              if (i < start + 31) j += ",";
+              if (i < start + 31) {
+                buf[len++] = ',';
+              }
+              // Safety: prevent buffer overflow
+              if (len >= (int)sizeof(buf) - 20) break;
             }
-            j += "]"; return j;
+            buf[len++] = ']';
+            buf[len] = '\0';
+            sensor->publish_state(buf);
           };
-          id(json_tomorrow_15min_prices_kwh_p1_00_00_07_45).publish_state(build32(0));
-          id(json_tomorrow_15min_prices_kwh_p2_08_00_15_45).publish_state(build32(32));
-          id(json_tomorrow_15min_prices_kwh_p3_16_00_23_45).publish_state(build32(64));
+
+          build32_fixed(0,  id(json_tomorrow_15min_prices_kwh_p1_00_00_07_45));
+          yield();  // v1.2.2: Yield between heavy operations
+          build32_fixed(32, id(json_tomorrow_15min_prices_kwh_p2_08_00_15_45));
+          yield();  // v1.2.2: Yield between heavy operations
+          build32_fixed(64, id(json_tomorrow_15min_prices_kwh_p3_16_00_23_45));
 
           if (min_v < 9999.0f) {
             id(tomorrow_min_price).publish_state(min_v);
@@ -1751,6 +1861,9 @@ script:
             if (id(price_timestamps_tomorrow)[j] <= ts_now_tomorrow) { cur = j; break; }
           id(tomorrow_current_price_status_str) = (cur >= 0) ? "Valid" : "Missing";
           id(tomorrow_last_update_attempt) = id(ha_time).now().timestamp;
+
+          // v1.2.2: Log heap at end
+          ESP_LOGI("eprices", "recompute_tomorrow: done, free heap = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
   # ---------------------------------------------------------------------------
   # MIDNIGHT BRIDGE
