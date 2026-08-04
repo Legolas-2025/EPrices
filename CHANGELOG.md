@@ -1,5 +1,54 @@
 # EPrices – Changelog
 
+## v1.2.3 — 2026-08-04
+
+### Uptime sensor bucket display and logbook change-detection
+
+The `Uptime` text sensor previously published a high-precision human-readable
+uptime string (e.g. `3 h 22 min`, `12 d 4 h 17 min`) on every internal
+`uptime` sensor update, which runs every 60 seconds. In the Home Assistant
+activity log, this produced one state change per minute during the first day
+after a reboot — a noisy stream redundant with the existing `Last Reboot`
+text sensor.
+
+The uptime lambda now formats the value into coarse hourly / daily / monthly
+buckets and only calls `publish_state` when the bucket string actually
+changes. Result: **one logbook entry per hour** for the first day, **one per
+day** through the first month, **one per month** through the first year, and
+**one per month** after that.
+
+**New display buckets:**
+
+| Boot age | State | Window |
+|---|---|---|
+| 0 – 59 min | `< 1 hour` | 1 h |
+| 1 – 23 h | `> N hour(s)` | 1 h |
+| 1 – 30 d | `> N day(s)` | 1 d |
+| 1 – 11 mo | `> N month(s)` | 30 d |
+| 12+ mo | `> N year(s)` or `> N year(s) N month(s)` | 30 d |
+
+Singular/plural is handled in C++ (`1 hour` vs `2 hours`, `1 day` vs
+`2 days`, etc.). Conventions: 1 month = 30 days, 1 year = 12 months —
+consistent with the existing `d / 30` month convention used elsewhere in
+the file.
+
+**New global:**
+- `last_published_uptime` (type: `std::string`, `restore_value: false`,
+  `initial_value: '""'`) — tracks the most recently published bucket value.
+  The uptime lambda compares against it and only calls `publish_state` when
+  the bucket string differs.
+
+The `update_interval: 60s` on the internal `uptime` sensor is kept as-is so
+the lambda still runs every minute and reliably catches hour-boundary
+transitions even under transient load.
+
+**Changed locations in `eprices.yaml`:**
+- `globals:` — added `last_published_uptime`
+- Internal `uptime` sensor `on_raw_value` lambda — replaced minute-precision
+  format with bucket display + change-detection guard
+
+---
+
 ## v1.2.2 — 2026-04-28
 
 ### ESP32 task watchdog timeout increase
