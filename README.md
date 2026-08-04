@@ -32,7 +32,8 @@ Assistant automations are required for any core functionality.
 - **Tomorrow live sensors** evaluate at `now + 86400s` — reflecting tomorrow at the same local time
 - Supports **any Energy-Charts bidding zone** (SI, DE-LU, AT, FR, HR, HU and more)
 - Full **diagnostic sensor suite** — NVS status, fetch attempts, API fetch times,
-  data loaded times, WiFi signal, human-readable uptime
+  data loaded times, WiFi signal, human-readable bucketed uptime (one HA logbook
+  entry per hour / day / month — no per-minute churn)
 - All fee and VAT settings configurable via `secrets.yaml` — **no code changes needed**
 
 ---
@@ -265,7 +266,7 @@ safe on DST transition days (23-hour and 25-hour days).
 | Sensor | Entity ID | Description |
 |---|---|---|
 | Last Reboot | `sensor.eprices_last_reboot` | Timestamp of last device boot |
-| Uptime | `sensor.eprices_uptime` | Human-readable: `45 s` / `5 min` / `3 h 22 min` / `12 d 4 h` / `4 months 12 d` |
+| Uptime | `sensor.eprices_uptime` | Human-readable bucketed: `< 1 hour` / `> N hours` / `> N days` / `> N months` / `> N year(s) N month(s)` — one logbook entry per hour, day, or month |
 | WiFi Signal | `sensor.eprices_wifi_signal` | RSSI in dBm, updated every 60s |
 | Last Update Source | `sensor.eprices_last_update_source` | `NVS_boot` / `HTTP_today` / `midnight_bridge` / `NVS_api` etc. |
 | Today Data Date | `sensor.eprices_today_data_date` | Date of currently stored today data |
