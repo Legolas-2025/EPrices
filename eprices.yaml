@@ -1,8 +1,22 @@
 # =============================================================================
-# ESPHome: EPrices v1.2.2
+# ESPHome: EPrices v1.2.3
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.2.3 uptime log noise reduction (2026-08-04):
+# - Uptime text sensor now uses coarse bucketed display instead of minute
+#   precision: "< 1 hour" / "> N hour(s)" / "> N day(s)" / "> N month(s)" /
+#   "> N year(s)" / "> N year(s) N month(s)"
+#   Buckets update once per hour (first day), once per day (first month),
+#   once per month (first year) — eliminates per-minute state churn in
+#   the HA activity log
+# - Added global last_published_uptime (std::string) to track the last
+#   published bucket value; the uptime lambda only calls publish_state
+#   when the bucket string actually changes
+# - Singular/plural handled in C++ (1 hour vs 2 hours, 1 day vs 2 days, etc.)
+# - Conventions: 1 month = 30 days, 1 year = 12 months — consistent with
+#   the existing d / 30 month convention used elsewhere in the file
 #
 # v1.2.2 stability fixes (2026-04-28):
 # - Added CONFIG_ESP_TASK_WDT_TIMEOUT_S = 40 to give the watchdog extra headroom
@@ -509,6 +523,10 @@ globals:
   - id: boot_time
     type: time_t
     initial_value: '0'
+  - id: last_published_uptime
+    type: std::string
+    restore_value: false
+    initial_value: '""'
   - id: last_successful_update
     type: time_t
     initial_value: '0'
@@ -864,27 +882,44 @@ sensor:
       then:
         - lambda: |-
             uint32_t s = (uint32_t)x;
-            char buf[32];
-            if (s < 120) {
-              snprintf(buf, sizeof(buf), "%u s", s);
-            } else if (s < 48 * 3600) {
+            char buf[48];
+
+            if (s < 3600) {
+              // < 1 hour: one state, no logbook churn
+              snprintf(buf, sizeof(buf), "< 1 hour");
+            } else if (s < 86400UL) {
+              // 1..23 hours — bucket by full hour
               uint32_t h = s / 3600;
-              uint32_t m = (s % 3600) / 60;
-              if (h < 2)
-                snprintf(buf, sizeof(buf), "%u min", s / 60);
-              else
-                snprintf(buf, sizeof(buf), "%u h %u min", h, m);
-            } else if (s < 90UL * 86400UL) {
-              uint32_t d = s / 86400;
-              uint32_t h = (s % 86400) / 3600;
-              snprintf(buf, sizeof(buf), "%u d %u h", d, h);
+              snprintf(buf, sizeof(buf), "> %lu hour%s", h, h == 1 ? "" : "s");
+            } else if (s < 31UL * 86400UL) {
+              // 1..30 days — bucket by full day
+              uint32_t d = s / 86400UL;
+              snprintf(buf, sizeof(buf), "> %lu day%s", d, d == 1 ? "" : "s");
+            } else if (s < 12UL * 30UL * 86400UL) {
+              // 1..11 months — bucket by full month (1 month = 30 days)
+              uint32_t mo = s / (30UL * 86400UL);
+              snprintf(buf, sizeof(buf), "> %lu month%s", mo, mo == 1 ? "" : "s");
             } else {
-              uint32_t d   = s / 86400;
-              uint32_t mo  = d / 30;
-              uint32_t rem = d % 30;
-              snprintf(buf, sizeof(buf), "%u months %u d", mo, rem);
+              // 1 year and up — year + optional months (1 year = 12 months)
+              uint32_t mo_total = s / (30UL * 86400UL);
+              uint32_t y  = mo_total / 12;
+              uint32_t mo = mo_total % 12;
+              if (mo == 0) {
+                snprintf(buf, sizeof(buf), "> %lu year%s", y, y == 1 ? "" : "s");
+              } else {
+                snprintf(buf, sizeof(buf), "> %lu year%s %lu month%s",
+                         y, y == 1 ? "" : "s",
+                         mo, mo == 1 ? "" : "s");
+              }
             }
-            id(uptime_text).publish_state(buf);
+
+            // Only publish on actual bucket change — prevents
+            // per-minute state churn in HA's activity log
+            std::string new_state(buf);
+            if (new_state != id(last_published_uptime)) {
+              id(last_published_uptime) = new_state;
+              id(uptime_text).publish_state(new_state);
+            }
 
 # =============================================================================
 # TEXT SENSORS – TODAY
