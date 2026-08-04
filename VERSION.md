@@ -1,5 +1,40 @@
 # EPrices – Version History
 
+## v1.2.3 — 2026-08-04
+
+Quietness patch for the Home Assistant activity log. No new sensors, no
+secrets changes, no entity ID changes. Drop-in replacement for v1.2.2.
+
+### Uptime display bucketed and change-detected
+
+The `Uptime` text sensor previously published a new value every minute
+(e.g. `3 h 22 min`, `12 d 4 h 17 min`) because the underlying internal
+`uptime` sensor updates every 60 seconds and the lambda always called
+`publish_state`. In the HA activity log this produced a noisy stream of
+state changes redundant with the existing `Last Reboot` text sensor.
+
+The lambda now formats uptime into coarse buckets and only publishes when
+the bucket string changes — **one logbook entry per hour** for the first
+day, then **one per day**, then **one per month**.
+
+**Buckets:**
+
+| Age | Display |
+|---|---|
+| 0 – 59 min | `< 1 hour` |
+| 1 – 23 h | `> 1 hour` ... `> 23 hours` |
+| 1 – 30 d | `> 1 day` ... `> 30 days` |
+| 1 – 11 mo | `> 1 month` ... `> 11 months` |
+| 12+ mo | `> 1 year` ... `> N year(s) N month(s)` |
+
+**New global:** `last_published_uptime` (`std::string`) — tracks the last
+published bucket so the lambda can skip publishing when the value hasn't
+crossed a boundary.
+
+See `CHANGELOG.md` for full implementation details.
+
+---
+
 ## v1.2.2 — 2026-04-28
 
 Stability patch addressing spontaneous reboots during tomorrow price fetch at ~13:55.
