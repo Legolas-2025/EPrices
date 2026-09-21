@@ -1,5 +1,72 @@
 # EPrices – Changelog
 
+## v1.2.4 — 2026-09-22
+
+### Force button NVS cache bypass
+
+Fixed a bug where "Force Today's Update" and "Force Tomorrow's Update" buttons
+served stale NVS-cached prices instead of performing a fresh HTTP fetch, even
+when the button was pressed explicitly to recover from corrupt or wrong cached
+data.
+
+**Root cause:** `smart_price_update` and `smart_tomorrow_price_update` are
+NVS-first by design — they load from NVS when a matching date and valid count
+are found, and skip the HTTP fetch entirely. This is correct for automatic
+retries and boot recovery, but wrong for a manual "Force" button press, where
+the user's intent is always to go to the API regardless of what is cached.
+
+**Fix:** Both button `on_press` handlers now call
+`eprices_nvs::clear_today_slot()` / `clear_tomorrow_slot()` and reset the
+in-memory entry count to `0` before executing the update script. With count
+zeroed in both NVS and RAM, the NVS load step inside the update script returns
+false and the HTTP fetch always proceeds. NVS is repopulated with fresh API
+data at the end of the fetch as normal.
+
+**New function in `eprices_nvs.h`:**
+- `clear_today_slot()` — mirrors the existing `clear_tomorrow_slot()`
+
+**Changed locations in `eprices.yaml`:**
+- `Force Today's Update` button `on_press` — added `clear_today_slot()` call
+  and `today_entry_count = 0` before `smart_price_update`
+- `Force Tomorrow's Update` button `on_press` — added `clear_tomorrow_slot()`
+  call and `tomorrow_entry_count = 0` before `smart_tomorrow_price_update`
+
+**Changed locations in `eprices_nvs.h`:**
+- Added `inline void clear_today_slot() { clear_slot("td_count"); }`
+
+---
+
+### Today HTTP fetch URL explicit date parameters
+
+Fixed a bug where the today HTTP fetch URL contained no date parameters,
+causing the Energy-Charts `/price` endpoint to return a stale cached dataset
+approximately two months old instead of the current day's prices.
+
+**Root cause:** The Energy-Charts API `/price` endpoint, when called without
+explicit `start=` and `end=` date parameters, has stopped returning the current
+rolling day's data and instead returns a stale cached window. The endpoint is
+not marked deprecated (`"deprecated": false` in the response) but the default
+behaviour is broken. The tomorrow fetch URL already included a `&start=` date
+parameter; the today fetch did not.
+
+This was confirmed by comparing:
+- `GET /price?bzn=SI` → returned 96 entries for 2026-07-21 (two months stale)
+- `GET /price?bzn=SI&start=2026-09-22&end=2026-09-22` → returned correct 96
+  entries for today
+
+**Fix:** Both the today and tomorrow fetch URL builders now include explicit
+`&start=YYYY-MM-DD&end=YYYY-MM-DD` date parameters. The `char url[]` buffer
+in both lambdas was enlarged from 128 to 160 bytes to accommodate the longer
+URL string.
+
+**Changed locations in `eprices.yaml`:**
+- `smart_price_update` script URL lambda — added `&start=%04d-%02d-%02d&end=%04d-%02d-%02d`
+  using today's date from `id(ha_time).now()`; buffer `char url[128]` → `char url[160]`
+- `smart_tomorrow_price_update` script URL lambda — added `&end=%04d-%02d-%02d`
+  to match; buffer `char url[128]` → `char url[160]`
+
+---
+
 ## v1.2.3 — 2026-08-04
 
 ### Uptime sensor bucket display and logbook change-detection
