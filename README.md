@@ -24,6 +24,9 @@ Assistant automations are required for any core functionality.
 - **Midnight bridge** — tomorrow's data automatically becomes today at 00:00, fully on-device
 - **Auto-retry logic** — up to 8 HTTP fetch attempts for both today and tomorrow,
   with a **120-second stuck-fetch watchdog** that unblocks retries after TCP-level stalls
+- **Force buttons always fetch from API** — "Force Today's Update" and "Force
+  Tomorrow's Update" clear the NVS cache before fetching, guaranteeing a real
+  HTTP call regardless of what is stored locally
 - **Task watchdog stability** — watchdog timeout increased to 40s, idle task checking disabled;
   periodic `yield()` calls and optimised JSON building prevent spontaneous reboots during
   heavy parsing when full price data arrives (~13:55)
@@ -288,8 +291,8 @@ safe on DST transition days (23-hour and 25-hour days).
 
 | Button | Entity ID | Description |
 |---|---|---|
-| Force Today's Update | `button.eprices_force_today_s_update` | Trigger immediate today HTTP fetch |
-| Force Tomorrow's Update | `button.eprices_force_tomorrow_s_update` | Trigger immediate tomorrow fetch (window: 13:20–23:50) |
+| Force Today's Update | `button.eprices_force_today_s_update` | Clear today NVS cache and trigger immediate HTTP fetch |
+| Force Tomorrow's Update | `button.eprices_force_tomorrow_s_update` | Clear tomorrow NVS cache and trigger immediate HTTP fetch (window: 13:20–23:50) |
 | Reboot Device | `button.eprices_reboot_device` | Restart the ESP32 |
 
 ---
