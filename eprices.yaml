@@ -1,8 +1,30 @@
 # =============================================================================
-# ESPHome: EPrices v1.2.3
+# ESPHome: EPrices v1.2.4
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.2.4 force button NVS cache bypass fix (2026-09-21):
+# - Fixed today HTTP fetch URL: added explicit &start=YYYY-MM-DD&end=YYYY-MM-DD
+#   date parameters. The bare /price?bzn=XX endpoint (no dates) has started
+#   returning a stale cached window (~2 months old) instead of the current day.
+#   Both today and tomorrow fetch URLs now include explicit date bounds.
+#   char url[] buffers enlarged from 128 to 160 bytes to fit the longer URL.
+# - Fixed a bug where "Force Today's Update" and "Force Tomorrow's Update"
+#   buttons served stale NVS-cached prices instead of performing a fresh HTTP
+#   fetch when valid prices for today's/tomorrow's date were already stored in
+#   NVS. The smart_price_update / smart_tomorrow_price_update scripts are
+#   NVS-first by design; with a matching date and count > 0 in NVS they skip
+#   the API call entirely, making the force buttons behave identically to a
+#   passive NVS load while misleadingly logging "Manual update triggered".
+# - Both button on_press handlers now call eprices_nvs::clear_today_slot() /
+#   clear_tomorrow_slot() and reset the in-memory entry count to 0 before
+#   executing the update script. This guarantees the NVS load step inside
+#   smart_price_update returns false and the HTTP fetch always proceeds.
+# - NVS is repopulated with fresh API data at the end of the fetch as normal.
+# - Added clear_today_slot() wrapper to eprices_nvs.h (mirrors the existing
+#   clear_tomorrow_slot()).
+# - Boot recovery, auto-retry, and midnight bridge paths are unaffected.
 #
 # v1.2.3 uptime log noise reduction (2026-08-04):
 # - Uptime text sensor now uses coarse bucketed display instead of minute
@@ -1229,8 +1251,12 @@ button:
     icon: "mdi:refresh"
     on_press:
       then:
-        - logger.log: "Manual Today update triggered"
+        - logger.log: "Manual Today update triggered (NVS slot cleared)"
         - lambda: |-
+            // v1.2.4: Clear NVS slot and in-memory count so smart_price_update
+            // is forced to perform an HTTP fetch instead of serving NVS cache
+            eprices_nvs::clear_today_slot();
+            id(today_entry_count) = 0;
             id(update_status_message) = "Updating...";
             id(today_price_status_message).publish_state("Updating...");
         - script.execute: smart_price_update
@@ -1247,7 +1273,11 @@ button:
                              (t.hour == 13 && t.minute >= 20) ||
                              (t.hour == 23 && t.minute <= 50);
             if (in_window) {
-              ESP_LOGI("eprices", "Manual Tomorrow update triggered");
+              // v1.2.4: Clear NVS slot and in-memory count so smart_tomorrow_price_update
+              // is forced to perform an HTTP fetch instead of serving NVS cache
+              eprices_nvs::clear_tomorrow_slot();
+              id(tomorrow_entry_count) = 0;
+              ESP_LOGI("eprices", "Manual Tomorrow update triggered (NVS slot cleared)");
               id(tomorrow_update_status_message) = "Updating...";
               id(tomorrow_price_status_message).publish_state("Updating...");
               id(smart_tomorrow_price_update).execute();  // one-shot
@@ -1983,10 +2013,16 @@ script:
           id(retry_count)++;
           { char buf[8]; snprintf(buf, sizeof(buf), "%d", id(retry_count)); id(today_price_update_attempts).publish_state(buf); }
           // Pre-compute URL into global
-          char url[128];
+          // v1.2.4: Add explicit start=&end= date parameters — the bare /price
+          // endpoint without dates now returns stale cached data (~2 months old).
+          // Adding today's date forces the API to return the correct day's prices.
+          auto td = id(ha_time).now();
+          char url[160];
           snprintf(url, sizeof(url),
-                   "https://api.energy-charts.info/price?bzn=%s",
-                   id(country_bzn).c_str());
+                   "https://api.energy-charts.info/price?bzn=%s&start=%04d-%02d-%02d&end=%04d-%02d-%02d",
+                   id(country_bzn).c_str(),
+                   td.year, td.month, td.day_of_month,
+                   td.year, td.month, td.day_of_month);
           id(fetch_url_today) = std::string(url);
           ESP_LOGI("eprices", "Today fetch URL: %s", url);
       - http_request.get:
@@ -2087,13 +2123,16 @@ script:
           id(tomorrow_retry_count)++;
           { char buf[8]; snprintf(buf, sizeof(buf), "%d", id(tomorrow_retry_count)); id(tomorrow_price_update_attempts).publish_state(buf); }
           // Pre-compute URL into global
+          // v1.2.4: Add explicit end= date parameter to match today fix —
+          // ensures the API returns only tomorrow's day and not a multi-day window.
           auto now = id(ha_time).now();
           time_t tmr_t = (time_t)now.timestamp + 86400;
           struct tm *tmr_tm = localtime(&tmr_t);
-          char url[128];
+          char url[160];
           snprintf(url, sizeof(url),
-                   "https://api.energy-charts.info/price?bzn=%s&start=%04d-%02d-%02d",
+                   "https://api.energy-charts.info/price?bzn=%s&start=%04d-%02d-%02d&end=%04d-%02d-%02d",
                    id(country_bzn).c_str(),
+                   tmr_tm->tm_year + 1900, tmr_tm->tm_mon + 1, tmr_tm->tm_mday,
                    tmr_tm->tm_year + 1900, tmr_tm->tm_mon + 1, tmr_tm->tm_mday);
           id(fetch_url_tomorrow) = std::string(url);
           ESP_LOGI("eprices", "Tomorrow fetch URL: %s", url);
