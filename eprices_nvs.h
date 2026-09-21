@@ -124,5 +124,6 @@ inline bool load_tomorrow(const std::string &expected_date,
   return load("tm_count","tm_date","tm_prices","tm_ts", expected_date, p, ts, cnt);
 }
 inline void clear_tomorrow_slot() { clear_slot("tm_count"); }
+inline void clear_today_slot()    { clear_slot("td_count"); }
 
 } // namespace eprices_nvs
