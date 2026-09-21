@@ -1,5 +1,40 @@
 # EPrices – Version History
 
+## v1.2.4 — 2026-09-22
+
+Bug-fix release. No new sensors, no secrets changes, no entity ID changes.
+Drop-in replacement for v1.2.3.
+
+### Force buttons now always perform a real HTTP fetch
+
+Fixed a long-standing behavioural bug where the "Force Today's Update" and
+"Force Tomorrow's Update" buttons silently served NVS-cached prices instead
+of fetching from the API. If valid prices for today's (or tomorrow's) date
+were already in NVS, the underlying `smart_price_update` script would load
+from cache and skip the HTTP call entirely — defeating the purpose of a force
+button. The status message could even say "Updating..." while in fact no API
+call was made.
+
+Both button `on_press` handlers now clear the relevant NVS slot and zero the
+in-memory entry count before running the update script, guaranteeing an HTTP
+fetch on every manual press. A new `clear_today_slot()` wrapper was added to
+`eprices_nvs.h` to mirror the existing `clear_tomorrow_slot()`. Boot recovery,
+auto-retry, and the midnight bridge are completely unaffected.
+
+### Today fetch URL broken by Energy-Charts API default behaviour change
+
+Fixed a critical bug where the today HTTP fetch returned a stale cached dataset
+approximately two months old instead of the current day's prices. The
+Energy-Charts `/price` endpoint, when called without explicit date parameters,
+no longer returns the current rolling day and instead returns a stale window.
+The today URL now includes explicit `&start=YYYY-MM-DD&end=YYYY-MM-DD`
+parameters. The tomorrow URL already had a `&start=` parameter and has been
+updated to also include `&end=` for symmetry and robustness.
+
+See `CHANGELOG.md` for full implementation details.
+
+---
+
 ## v1.2.3 — 2026-08-04
 
 Quietness patch for the Home Assistant activity log. No new sensors, no
