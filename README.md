@@ -18,7 +18,7 @@ Assistant automations are required for any core functionality.
 - Fetches **15-minute resolution** spot prices for **today** and **tomorrow**
 - Automatically applies your **provider fee** and **VAT rate** to raw €/MWh prices —
   with **separate fee configuration for negative spot prices**
-- Exposes **96 per-day price points** plus **24-hour averages** as JSON text sensors
+- Exposes **96 per-day price points** plus **hourly averages** as JSON text sensors
   for use in HA automations and dashboards
 - **NVS persistence** — prices survive device reboots without re-fetching
 - **Midnight bridge** — tomorrow's data automatically becomes today at 00:00, fully on-device
@@ -30,9 +30,9 @@ Assistant automations are required for any core functionality.
 - **Task watchdog stability** — watchdog timeout increased to 40s, idle task checking disabled;
   periodic `yield()` calls and optimised JSON building prevent spontaneous reboots during
   heavy parsing when full price data arrives (~13:55)
-- **DST-safe** — uses UNIX timestamps and binary search throughout, no hour-slot arithmetic
+- **DST-safe** — all price indexing uses UNIX timestamps and binary search; tomorrow date arithmetic uses calendar-day increment (DST-safe on spring-forward and fall-back nights); fall-back day (25-hour) hourly averages include all hour blocks
 - **Staleness detection** — `Today Current Price Status` shows `Stale` if stored date mismatches today
-- **Tomorrow live sensors** evaluate at `now + 86400s` — reflecting tomorrow at the same local time
+- **Tomorrow live sensors** evaluate at same local time tomorrow via calendar-day increment — DST-correct on transition nights
 - Supports **any Energy-Charts bidding zone** (SI, DE-LU, AT, FR, HR, HU and more)
 - Full **diagnostic sensor suite** — NVS status, fetch attempts, API fetch times,
   data loaded times, WiFi signal, human-readable bucketed uptime (one HA logbook
@@ -196,9 +196,12 @@ is discarded and a fresh HTTP fetch is triggered automatically.
 
 ### DST safety
 
-All price indexing uses UNIX timestamps and binary search. There is no
-hour-slot arithmetic anywhere in the codebase, making the firmware fully
-safe on DST transition days (23-hour and 25-hour days).
+All price indexing uses UNIX timestamps and binary search, and all "tomorrow"
+date arithmetic now uses calendar-day increment (`tm_mday += 1` with
+`mktime()`) instead of `+86400` UTC-second arithmetic. This fixes
+spring-forward edge cases and keeps tomorrow lookups aligned to same local
+time. Hourly averages use a 25-slot sequential hour-block model, so both
+02:xx blocks on the fall-back day are preserved correctly.
 
 ---
 
@@ -223,7 +226,7 @@ safe on DST transition days (23-hour and 25-hour days).
 
 | Sensor | Entity ID | Description |
 |---|---|---|
-| Today JSON Hourly Prices EUR⁄kWh | `sensor.eprices_today_json_hourly_prices_eur_kwh` | JSON array of 24 hourly averages; `""` when no data |
+| Today JSON Hourly Prices EUR⁄kWh | `sensor.eprices_today_json_hourly_prices_eur_kwh` | JSON array of hourly averages (25 slots; all hour blocks on fall-back day); `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array of 32 prices; `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array of 32 prices; `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array of 32 prices; `""` when no data |
@@ -238,13 +241,13 @@ safe on DST transition days (23-hour and 25-hour days).
 
 | Sensor | Entity ID | Description |
 |---|---|---|
-| Tomorrow Current Price | `sensor.eprices_tomorrow_current_price` | Tomorrow at same local time as now |
-| Tomorrow Next Price | `sensor.eprices_tomorrow_next_price` | Tomorrow next 15-min slot |
+| Tomorrow Current Price | `sensor.eprices_tomorrow_current_price` | Tomorrow at same local time as now (evaluates at same local time tomorrow (DST-safe calendar-day increment)) |
+| Tomorrow Next Price | `sensor.eprices_tomorrow_next_price` | Tomorrow next 15-min slot (evaluates at same local time tomorrow (DST-safe calendar-day increment)) |
 | Tomorrow Average Price | `sensor.eprices_tomorrow_average_price` | Average of all hourly prices €/kWh |
 | Tomorrow Highest Price | `sensor.eprices_tomorrow_highest_price` | Highest 15-min price €/kWh |
 | Tomorrow Lowest Price | `sensor.eprices_tomorrow_lowest_price` | Lowest 15-min price €/kWh |
-| Tomorrow Current Hourly Price | `sensor.eprices_tomorrow_current_hourly_price` | Tomorrow same hour average €/kWh |
-| Tomorrow Next Hourly Price | `sensor.eprices_tomorrow_next_hourly_price` | Tomorrow next hour average €/kWh |
+| Tomorrow Current Hourly Price | `sensor.eprices_tomorrow_current_hourly_price` | Tomorrow same hour average €/kWh (evaluates at same local time tomorrow (DST-safe calendar-day increment)) |
+| Tomorrow Next Hourly Price | `sensor.eprices_tomorrow_next_hourly_price` | Tomorrow next hour average €/kWh (evaluates at same local time tomorrow (DST-safe calendar-day increment)) |
 | Tomorrow Highest Hourly Price | `sensor.eprices_tomorrow_highest_hourly_price` | Highest hourly average €/kWh |
 | Tomorrow Lowest Hourly Price | `sensor.eprices_tomorrow_lowest_hourly_price` | Lowest hourly average €/kWh |
 | Tomorrow Current Max Hourly Price Percentage | `sensor.eprices_tomorrow_current_max_hourly_price_percentage` | Same-time hour as % of tomorrow max |
@@ -253,7 +256,7 @@ safe on DST transition days (23-hour and 25-hour days).
 
 | Sensor | Entity ID | Description |
 |---|---|---|
-| Tomorrow JSON Hourly Prices EUR⁄kWh | `sensor.eprices_tomorrow_json_hourly_prices_eur_kwh` | JSON array of 24 hourly averages; `""` when no data |
+| Tomorrow JSON Hourly Prices EUR⁄kWh | `sensor.eprices_tomorrow_json_hourly_prices_eur_kwh` | JSON array of hourly averages (25 slots; all hour blocks on fall-back day); `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array of 32 prices; `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array of 32 prices; `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array of 32 prices; `""` when no data |
