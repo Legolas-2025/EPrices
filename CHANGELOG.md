@@ -6,7 +6,8 @@
 
 Bug-fix release that corrects three DST-related edge cases identified by
 static analysis of the v1.2.4 firmware. No new sensors, no secrets changes,
-no entity ID changes. Drop-in replacement for v1.2.4.
+no entity ID changes. Drop-in replacement for v1.2.4 (migrating to v1.3.0 
+requires no changes to eprices_nvs.h file).
 
 #### Bug 1 — `+86400` UTC seconds for "tomorrow's date" (moderate)
 
