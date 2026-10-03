@@ -1,8 +1,20 @@
 # =============================================================================
-# ESPHome: EPrices v1.2.4
+# ESPHome: EPrices v1.3.0
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.3.0 DST hardening (2026-10-03):
+# - Bug 1 fixed (3 locations): all "tomorrow date" calculations now use
+#   calendar-day increment (tm_mday += 1 + mktime()) instead of +86400 UTC
+#   seconds. This fixes spring-forward Saturday evening rollover to Monday.
+# - Bug 2 fixed (4 sensor lambdas): tomorrow lookup anchor now uses same local
+#   time tomorrow via calendar-day increment, so DST transition nights select
+#   the correct 15-minute slot.
+# - Bug 3 fixed: hourly average vectors expanded from 24 to 25 slots and
+#   recompute logic now uses sequential hour-block indexing, preserving both
+#   02:xx blocks on fall-back day. Hourly "current/next" sensors now use the
+#   same sequential block mapping for correct lookup on 25-hour days.
 #
 # v1.2.4 force button NVS cache bypass fix (2026-09-21):
 # - Fixed today HTTP fetch URL: added explicit &start=YYYY-MM-DD&end=YYYY-MM-DD
@@ -102,7 +114,7 @@
 # - Auto-retry: up to 8 HTTP fetch attempts for today and tomorrow
 # - DST-safe: UNIX timestamp binary search throughout (no hour-slot arithmetic)
 # - Staleness detection: Today Current Price Status shows "Stale" on date mismatch
-# - Tomorrow live sensors evaluate at now + 86400s (same local time tomorrow)
+# - Tomorrow live sensors evaluate at same local time tomorrow via calendar-day increment
 # - Tomorrow Data Loaded Time shows "Outside fetch window" before 13:20
 # - API fetch times reset to "Never" at midnight and on clear_tomorrow_prices
 # - API fetch attempt counters reset to 0 at midnight; publish 0 on boot
@@ -501,19 +513,19 @@ globals:
     type: std::string
     initial_value: '"00000000"'
 
-  # --- Legacy 96/24-slot vectors (for JSON text sensors) ---
+  # --- Legacy 96/25-slot vectors (for JSON text sensors) ---
   - id: hourly_prices
     type: std::vector<float>
     initial_value: 'std::vector<float>(96, 0.0f)'
   - id: hourly_avg_prices_kwh
     type: std::vector<float>
-    initial_value: 'std::vector<float>(24, 0.0f)'
+    initial_value: 'std::vector<float>(25, 0.0f)'
   - id: tomorrow_hourly_prices
     type: std::vector<float>
     initial_value: 'std::vector<float>(96, 0.0f)'
   - id: tomorrow_hourly_avg_prices_kwh
     type: std::vector<float>
-    initial_value: 'std::vector<float>(24, 0.0f)'
+    initial_value: 'std::vector<float>(25, 0.0f)'
 
   # --- Time strings ---
   - id: min_price_time_str
@@ -718,10 +730,18 @@ sensor:
       for (int j = id(today_entry_count) - 1; j >= 0; --j)
         if (id(price_timestamps_today)[j] <= ts) { idx = j; break; }
       if (idx < 0) return NAN;
-      time_t t = (time_t)id(price_timestamps_today)[idx];
-      struct tm *tmi = localtime(&t);
-      if (!tmi) return NAN;
-      int h = tmi->tm_hour;
+      // v1.3.0: find the sequential hour-block index for the current timestamp,
+      // matching the same sequential indexing used in recompute_today.
+      int h = -1;
+      int block = 0;
+      int prev_hr = -1;
+      for (int k = 0; k < id(today_entry_count); ++k) {
+        time_t kt = (time_t)id(price_timestamps_today)[k];
+        struct tm ktm;
+        localtime_r(&kt, &ktm);
+        if (ktm.tm_hour != prev_hr) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; }
+        if (k == idx) { h = block; break; }
+      }
       return (h >= 0 && h < (int)id(hourly_avg_prices_kwh).size()) ? id(hourly_avg_prices_kwh)[h] : NAN;
 
   - platform: template
@@ -737,10 +757,18 @@ sensor:
       for (int j = id(today_entry_count) - 1; j >= 0; --j)
         if (id(price_timestamps_today)[j] <= ts) { idx = j; break; }
       if (idx < 0) return NAN;
-      time_t t = (time_t)id(price_timestamps_today)[idx];
-      struct tm *tmi = localtime(&t);
-      if (!tmi) return NAN;
-      int h = tmi->tm_hour + 1;
+      // v1.3.0: find the sequential hour-block index for the current timestamp,
+      // matching the same sequential indexing used in recompute_today.
+      int h = -1;
+      int block = 0;
+      int prev_hr = -1;
+      for (int k = 0; k < id(today_entry_count); ++k) {
+        time_t kt = (time_t)id(price_timestamps_today)[k];
+        struct tm ktm;
+        localtime_r(&kt, &ktm);
+        if (ktm.tm_hour != prev_hr) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; }
+        if (k == idx) { h = block + 1; break; }
+      }
       return (h >= 0 && h < (int)id(hourly_avg_prices_kwh).size()) ? id(hourly_avg_prices_kwh)[h] : NAN;
 
   - platform: template
@@ -780,7 +808,15 @@ sensor:
     icon: "mdi:currency-eur"
     lambda: |-
       if (id(tomorrow_entry_count) == 0) return NAN;
-      int64_t ts = (int64_t)id(ha_time).now().timestamp + 86400;
+      // v1.3.0: compute "same local time tomorrow" via calendar-day increment
+      // so the anchor is correct on DST transition nights (+86400 UTC is wrong
+      // on spring-forward night where the local day is only 23 h long).
+      time_t now_t = (time_t)id(ha_time).now().timestamp;
+      struct tm tmr_lkp;
+      localtime_r(&now_t, &tmr_lkp);
+      tmr_lkp.tm_mday += 1;
+      tmr_lkp.tm_isdst = -1;
+      int64_t ts = (int64_t)mktime(&tmr_lkp);
       int idx = -1;
       for (int j = id(tomorrow_entry_count) - 1; j >= 0; --j)
         if (id(price_timestamps_tomorrow)[j] <= ts) { idx = j; break; }
@@ -794,7 +830,15 @@ sensor:
     icon: "mdi:arrow-right-circle"
     lambda: |-
       if (id(tomorrow_entry_count) == 0) return NAN;
-      int64_t ts = (int64_t)id(ha_time).now().timestamp + 86400;
+      // v1.3.0: compute "same local time tomorrow" via calendar-day increment
+      // so the anchor is correct on DST transition nights (+86400 UTC is wrong
+      // on spring-forward night where the local day is only 23 h long).
+      time_t now_t = (time_t)id(ha_time).now().timestamp;
+      struct tm tmr_lkp;
+      localtime_r(&now_t, &tmr_lkp);
+      tmr_lkp.tm_mday += 1;
+      tmr_lkp.tm_isdst = -1;
+      int64_t ts = (int64_t)mktime(&tmr_lkp);
       int idx = -1;
       for (int j = id(tomorrow_entry_count) - 1; j >= 0; --j)
         if (id(price_timestamps_tomorrow)[j] <= ts) { idx = j + 1; break; }
@@ -829,15 +873,31 @@ sensor:
     icon: "mdi:chart-line"
     lambda: |-
       if (id(tomorrow_entry_count) == 0) return NAN;
-      int64_t ts = (int64_t)id(ha_time).now().timestamp + 86400;
+      // v1.3.0: compute "same local time tomorrow" via calendar-day increment
+      // so the anchor is correct on DST transition nights (+86400 UTC is wrong
+      // on spring-forward night where the local day is only 23 h long).
+      time_t now_t = (time_t)id(ha_time).now().timestamp;
+      struct tm tmr_lkp;
+      localtime_r(&now_t, &tmr_lkp);
+      tmr_lkp.tm_mday += 1;
+      tmr_lkp.tm_isdst = -1;
+      int64_t ts = (int64_t)mktime(&tmr_lkp);
       int idx = -1;
       for (int j = id(tomorrow_entry_count) - 1; j >= 0; --j)
         if (id(price_timestamps_tomorrow)[j] <= ts) { idx = j; break; }
       if (idx < 0) return NAN;
-      time_t t = (time_t)id(price_timestamps_tomorrow)[idx];
-      struct tm *tmi = localtime(&t);
-      if (!tmi) return NAN;
-      int h = tmi->tm_hour;
+      // v1.3.0: find the sequential hour-block index for the current timestamp,
+      // matching the same sequential indexing used in recompute_tomorrow.
+      int h = -1;
+      int block = 0;
+      int prev_hr = -1;
+      for (int k = 0; k < id(tomorrow_entry_count); ++k) {
+        time_t kt = (time_t)id(price_timestamps_tomorrow)[k];
+        struct tm ktm;
+        localtime_r(&kt, &ktm);
+        if (ktm.tm_hour != prev_hr) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; }
+        if (k == idx) { h = block; break; }
+      }
       return (h >= 0 && h < (int)id(tomorrow_hourly_avg_prices_kwh).size()) ? id(tomorrow_hourly_avg_prices_kwh)[h] : NAN;
 
   - platform: template
@@ -848,15 +908,31 @@ sensor:
     icon: "mdi:arrow-right-circle-outline"
     lambda: |-
       if (id(tomorrow_entry_count) == 0) return NAN;
-      int64_t ts = (int64_t)id(ha_time).now().timestamp + 86400;
+      // v1.3.0: compute "same local time tomorrow" via calendar-day increment
+      // so the anchor is correct on DST transition nights (+86400 UTC is wrong
+      // on spring-forward night where the local day is only 23 h long).
+      time_t now_t = (time_t)id(ha_time).now().timestamp;
+      struct tm tmr_lkp;
+      localtime_r(&now_t, &tmr_lkp);
+      tmr_lkp.tm_mday += 1;
+      tmr_lkp.tm_isdst = -1;
+      int64_t ts = (int64_t)mktime(&tmr_lkp);
       int idx = -1;
       for (int j = id(tomorrow_entry_count) - 1; j >= 0; --j)
         if (id(price_timestamps_tomorrow)[j] <= ts) { idx = j; break; }
       if (idx < 0) return NAN;
-      time_t t = (time_t)id(price_timestamps_tomorrow)[idx];
-      struct tm *tmi = localtime(&t);
-      if (!tmi) return NAN;
-      int h = tmi->tm_hour + 1;
+      // v1.3.0: find the sequential hour-block index for the current timestamp,
+      // matching the same sequential indexing used in recompute_tomorrow.
+      int h = -1;
+      int block = 0;
+      int prev_hr = -1;
+      for (int k = 0; k < id(tomorrow_entry_count); ++k) {
+        time_t kt = (time_t)id(price_timestamps_tomorrow)[k];
+        struct tm ktm;
+        localtime_r(&kt, &ktm);
+        if (ktm.tm_hour != prev_hr) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; }
+        if (k == idx) { h = block + 1; break; }
+      }
       return (h >= 0 && h < (int)id(tomorrow_hourly_avg_prices_kwh).size()) ? id(tomorrow_hourly_avg_prices_kwh)[h] : NAN;
 
   - platform: template
@@ -1372,12 +1448,19 @@ script:
   - id: nvs_load_tomorrow_script
     then:
       - lambda: |-
-          auto now = id(ha_time).now();
-          time_t tmr_t = (time_t)now.timestamp + 86400;
-          struct tm *tmr_tm = localtime(&tmr_t);
+          // v1.3.0: advance the calendar day instead of adding 86400 UTC seconds.
+          // On spring-forward night +86400 UTC spans 25 local hours and lands on the
+          // day-after-tomorrow. tm_mday+1 + mktime() normalises correctly for any day.
+          time_t now_t = (time_t)id(ha_time).now().timestamp;
+          struct tm tmr_tm;
+          localtime_r(&now_t, &tmr_tm);
+          tmr_tm.tm_mday += 1;
+          tmr_tm.tm_hour = 12; // midday anchor — away from any DST boundary hour
+          tmr_tm.tm_isdst = -1;
+          mktime(&tmr_tm); // normalises month/year rollover and re-applies DST rules
           char tmr_buf[9];
           snprintf(tmr_buf, sizeof(tmr_buf), "%04d%02d%02d",
-                   tmr_tm->tm_year + 1900, tmr_tm->tm_mon + 1, tmr_tm->tm_mday);
+                   tmr_tm.tm_year + 1900, tmr_tm.tm_mon + 1, tmr_tm.tm_mday);
           std::string expected(tmr_buf);
 
           std::vector<float>   pv;
@@ -1608,12 +1691,19 @@ script:
 
           ESP_LOGI("eprices", "parse_tomorrow: %d token pairs found", (int)n);
 
-          auto now = id(ha_time).now();
-          time_t tmr_t = (time_t)now.timestamp + 86400;
-          struct tm *tmr_tm = localtime(&tmr_t);
+          // v1.3.0: advance the calendar day instead of adding 86400 UTC seconds.
+          // On spring-forward night +86400 UTC spans 25 local hours and lands on the
+          // day-after-tomorrow. tm_mday+1 + mktime() normalises correctly for any day.
+          time_t now_t = (time_t)id(ha_time).now().timestamp;
+          struct tm tmr_tm;
+          localtime_r(&now_t, &tmr_tm);
+          tmr_tm.tm_mday += 1;
+          tmr_tm.tm_hour = 12; // midday anchor — away from any DST boundary hour
+          tmr_tm.tm_isdst = -1;
+          mktime(&tmr_tm); // normalises month/year rollover and re-applies DST rules
           char tmr_buf[9];
           snprintf(tmr_buf, sizeof(tmr_buf), "%04d%02d%02d",
-                   tmr_tm->tm_year + 1900, tmr_tm->tm_mon + 1, tmr_tm->tm_mday);
+                   tmr_tm.tm_year + 1900, tmr_tm.tm_mon + 1, tmr_tm.tm_mday);
 
           // v1.2.2: Log heap before heavy parsing
           ESP_LOGI("eprices", "parse_tomorrow: free heap before parsing = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
@@ -1642,7 +1732,7 @@ script:
                    id(tomorrow_entry_count), heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
   # ---------------------------------------------------------------------------
-  # RECOMPUTE TODAY – fills legacy 96/24-slot vectors + JSON text sensors
+  # RECOMPUTE TODAY – fills legacy 96/25-slot vectors + JSON text sensors
   # v1.2.2: Optimized JSON string building to prevent heap fragmentation
   # ---------------------------------------------------------------------------
   - id: recompute_today
@@ -1679,10 +1769,25 @@ script:
             }
           }
 
-          std::vector<float> h_sums(24, 0.0f);
-          std::vector<int>   h_cnt(24, 0);
-          for (int i = 0; i < 96; i++)
-            if (!std::isnan(v[i])) { h_sums[i/4] += v[i]; h_cnt[i/4]++; }
+          std::vector<float> h_sums(25, 0.0f);
+          std::vector<int>   h_cnt(25, 0);
+          std::vector<int>   h_label(25, -1);
+          int prev_hour = -1;
+          int hour_block = -1;
+          for (int i = 0; i < n; i++) {
+            time_t t = (time_t)id(price_timestamps_today)[i];
+            struct tm tmi;
+            localtime_r(&t, &tmi);
+            if (tmi.tm_hour != prev_hour) {
+              hour_block++;
+              prev_hour = tmi.tm_hour;
+            }
+            if (hour_block >= 0 && hour_block < 25) {
+              h_sums[hour_block] += id(price_values_today)[i];
+              h_cnt[hour_block]++;
+              if (h_label[hour_block] < 0) h_label[hour_block] = tmi.tm_hour;
+            }
+          }
 
           float h_min_v = 9999.0f, h_max_v = -9999.0f;
           int   h_min_i = 0, h_max_i = 0;
@@ -1690,13 +1795,13 @@ script:
 
           // v1.2.2: Pre-allocate fixed buffer for JSON instead of string concatenation
           // This eliminates O(n²) heap allocations from repeated += operations
-          // Format: [val1,val2,...,val24] where val can be "null" or a float
-          // Max size: 24 * 12 (max float string) + 25 (commas/brackets) + 1 = ~320 bytes
+          // Format: [val1,val2,...,val25] where val can be "null" or a float
+          // Max size: 25 * 12 (max float string) + 26 (commas/brackets) + 1 = ~330 bytes
           char json_h_buf[400];
           int json_h_len = 0;
           json_h_buf[json_h_len++] = '[';
 
-          for (int i = 0; i < 24; i++) {
+          for (int i = 0; i < 25; i++) {
             if (h_cnt[i] > 0) {
               float ha = h_sums[i] / (float)h_cnt[i];
               id(hourly_avg_prices_kwh)[i] = ha;
@@ -1710,7 +1815,7 @@ script:
               id(hourly_avg_prices_kwh)[i] = NAN;
               json_h_len += snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "null");
             }
-            if (i < 23) {
+            if (i < 24) {
               json_h_buf[json_h_len++] = ',';
             }
           }
@@ -1766,8 +1871,8 @@ script:
             id(min_hourly_price).publish_state(h_min_v);
             id(max_hourly_price).publish_state(h_max_v);
             char hb[6];
-            sprintf(hb,"%02d:00",h_min_i); id(min_hourly_price_time_str)=hb;
-            sprintf(hb,"%02d:00",h_max_i); id(max_hourly_price_time_str)=hb;
+            sprintf(hb,"%02d:00",(h_label[h_min_i] >= 0 ? h_label[h_min_i] : h_min_i)); id(min_hourly_price_time_str)=hb;
+            sprintf(hb,"%02d:00",(h_label[h_max_i] >= 0 ? h_label[h_max_i] : h_max_i)); id(max_hourly_price_time_str)=hb;
           }
           if (cnt_kwh > 0) id(avg_price).publish_state((float)(raw_sum / cnt_kwh));
 
@@ -1827,10 +1932,25 @@ script:
             }
           }
 
-          std::vector<float> h_sums(24, 0.0f);
-          std::vector<int>   h_cnt(24, 0);
-          for (int i = 0; i < 96; i++)
-            if (!std::isnan(v[i])) { h_sums[i/4] += v[i]; h_cnt[i/4]++; }
+          std::vector<float> h_sums(25, 0.0f);
+          std::vector<int>   h_cnt(25, 0);
+          std::vector<int>   h_label(25, -1);
+          int prev_hour = -1;
+          int hour_block = -1;
+          for (int i = 0; i < n; i++) {
+            time_t t = (time_t)id(price_timestamps_tomorrow)[i];
+            struct tm tmi;
+            localtime_r(&t, &tmi);
+            if (tmi.tm_hour != prev_hour) {
+              hour_block++;
+              prev_hour = tmi.tm_hour;
+            }
+            if (hour_block >= 0 && hour_block < 25) {
+              h_sums[hour_block] += id(price_values_tomorrow)[i];
+              h_cnt[hour_block]++;
+              if (h_label[hour_block] < 0) h_label[hour_block] = tmi.tm_hour;
+            }
+          }
 
           float h_min_v = 9999.0f, h_max_v = -9999.0f;
           int   h_min_i = 0, h_max_i = 0;
@@ -1842,7 +1962,7 @@ script:
           int json_h_len = 0;
           json_h_buf[json_h_len++] = '[';
 
-          for (int i = 0; i < 24; i++) {
+          for (int i = 0; i < 25; i++) {
             if (h_cnt[i] > 0) {
               float ha = h_sums[i] / (float)h_cnt[i];
               id(tomorrow_hourly_avg_prices_kwh)[i] = ha;
@@ -1855,7 +1975,7 @@ script:
               id(tomorrow_hourly_avg_prices_kwh)[i] = NAN;
               json_h_len += snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "null");
             }
-            if (i < 23) {
+            if (i < 24) {
               json_h_buf[json_h_len++] = ',';
             }
           }
@@ -1909,8 +2029,8 @@ script:
             id(tomorrow_min_hourly_price).publish_state(h_min_v);
             id(tomorrow_max_hourly_price).publish_state(h_max_v);
             char hb[6];
-            sprintf(hb,"%02d:00",h_min_i); id(tomorrow_min_hourly_price_time_str)=hb;
-            sprintf(hb,"%02d:00",h_max_i); id(tomorrow_max_hourly_price_time_str)=hb;
+            sprintf(hb,"%02d:00",(h_label[h_min_i] >= 0 ? h_label[h_min_i] : h_min_i)); id(tomorrow_min_hourly_price_time_str)=hb;
+            sprintf(hb,"%02d:00",(h_label[h_max_i] >= 0 ? h_label[h_max_i] : h_max_i)); id(tomorrow_max_hourly_price_time_str)=hb;
           }
           if (cnt_kwh > 0) id(tomorrow_avg_price).publish_state((float)(raw_sum / cnt_kwh));
 
@@ -2125,15 +2245,22 @@ script:
           // Pre-compute URL into global
           // v1.2.4: Add explicit end= date parameter to match today fix —
           // ensures the API returns only tomorrow's day and not a multi-day window.
-          auto now = id(ha_time).now();
-          time_t tmr_t = (time_t)now.timestamp + 86400;
-          struct tm *tmr_tm = localtime(&tmr_t);
+          // v1.3.0: advance the calendar day instead of adding 86400 UTC seconds.
+          // On spring-forward night +86400 UTC spans 25 local hours and lands on the
+          // day-after-tomorrow. tm_mday+1 + mktime() normalises correctly for any day.
+          time_t now_t = (time_t)id(ha_time).now().timestamp;
+          struct tm tmr_tm;
+          localtime_r(&now_t, &tmr_tm);
+          tmr_tm.tm_mday += 1;
+          tmr_tm.tm_hour = 12; // midday anchor — away from any DST boundary hour
+          tmr_tm.tm_isdst = -1;
+          mktime(&tmr_tm); // normalises month/year rollover and re-applies DST rules
           char url[160];
           snprintf(url, sizeof(url),
                    "https://api.energy-charts.info/price?bzn=%s&start=%04d-%02d-%02d&end=%04d-%02d-%02d",
                    id(country_bzn).c_str(),
-                   tmr_tm->tm_year + 1900, tmr_tm->tm_mon + 1, tmr_tm->tm_mday,
-                   tmr_tm->tm_year + 1900, tmr_tm->tm_mon + 1, tmr_tm->tm_mday);
+                   tmr_tm.tm_year + 1900, tmr_tm.tm_mon + 1, tmr_tm.tm_mday,
+                   tmr_tm.tm_year + 1900, tmr_tm.tm_mon + 1, tmr_tm.tm_mday);
           id(fetch_url_tomorrow) = std::string(url);
           ESP_LOGI("eprices", "Tomorrow fetch URL: %s", url);
       - http_request.get:
@@ -2296,7 +2423,7 @@ script:
           id(today_entry_count) = 0;
           id(today_date_str) = "00000000";
           id(hourly_prices).assign(96, NAN);
-          id(hourly_avg_prices_kwh).assign(24, NAN);
+          id(hourly_avg_prices_kwh).assign(25, NAN);
           id(current_price).publish_state(NAN);
           id(today_next_price).publish_state(NAN);
           id(avg_price).publish_state(NAN);
@@ -2331,7 +2458,7 @@ script:
           id(tomorrow_entry_count) = 0;
           id(tomorrow_date_str) = "00000000";
           id(tomorrow_hourly_prices).assign(96, NAN);
-          id(tomorrow_hourly_avg_prices_kwh).assign(24, NAN);
+          id(tomorrow_hourly_avg_prices_kwh).assign(25, NAN);
           id(tomorrow_current_price).publish_state(NAN);
           id(tomorrow_next_price).publish_state(NAN);
           id(tomorrow_avg_price).publish_state(NAN);

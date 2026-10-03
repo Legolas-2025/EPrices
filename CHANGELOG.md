@@ -1,5 +1,111 @@
 # EPrices – Changelog
 
+## v1.3.0 — 2026-10-03
+
+### DST edge-case hardening — all three DST bugs fixed
+
+Bug-fix release that corrects three DST-related edge cases identified by
+static analysis of the v1.2.4 firmware. No new sensors, no secrets changes,
+no entity ID changes. Drop-in replacement for v1.2.4.
+
+#### Bug 1 — `+86400` UTC seconds for "tomorrow's date" (moderate)
+
+**Symptom:** On the spring-forward Saturday evening after ~23:00 CET, the
+tomorrow HTTP fetch URL, NVS expected-date string, and `tomorrow_date_str`
+all contained the date of the day-after-tomorrow (Monday) instead of tomorrow
+(Sunday). The API returned no data or the wrong day's data, and any valid NVS
+slot for the correct tomorrow date was rejected.
+
+**Root cause:** Computing "tomorrow" by adding exactly 86 400 UTC seconds to
+`now` and then calling `localtime()`. On spring-forward night the clocks skip
+one hour, so 86 400 UTC seconds span 25 local hours and advance two calendar
+days rather than one.
+
+**Fix:** All three locations now use a calendar-day increment with `mktime()`:
+```cpp
+time_t now_t = (time_t)id(ha_time).now().timestamp;
+struct tm tmr_tm;
+localtime_r(&now_t, &tmr_tm);
+tmr_tm.tm_mday += 1;
+tmr_tm.tm_hour = 12;   // midday anchor — away from DST boundary hour
+tmr_tm.tm_isdst = -1;
+mktime(&tmr_tm);       // normalises month/year rollover and re-applies DST rules
+```
+
+**Changed locations in `eprices.yaml`:**
+- `nvs_load_tomorrow_script` — tomorrow NVS expected-date string
+- `parse_energy_charts_tomorrow_script` — `tomorrow_date_str` population
+- `smart_tomorrow_price_update` — `fetch_url_tomorrow` URL date parameters
+
+---
+
+#### Bug 2 — `+86400` in tomorrow sensor lookup anchor (minor)
+
+**Symptom:** On DST transition nights, the four "Tomorrow" live sensors
+(`Tomorrow Current Price`, `Tomorrow Next Price`, `Tomorrow Current Hourly
+Price`, `Tomorrow Next Hourly Price`) selected a price slot approximately
+1 hour off relative to "same local time tomorrow", showing the wrong 15-minute
+price.
+
+**Root cause:** The binary-search anchor for `price_timestamps_tomorrow` was
+`now().timestamp + 86400`. On DST transition nights this is ~1 hour off from
+"same local time tomorrow" in the target day's local clock.
+
+**Fix:** The anchor is now computed via calendar-day increment:
+```cpp
+time_t now_t = (time_t)id(ha_time).now().timestamp;
+struct tm tmr_lkp;
+localtime_r(&now_t, &tmr_lkp);
+tmr_lkp.tm_mday += 1;
+tmr_lkp.tm_isdst = -1;
+int64_t ts = (int64_t)mktime(&tmr_lkp);
+```
+
+**Changed locations in `eprices.yaml`:**
+- `tomorrow_current_price` sensor lambda
+- `tomorrow_next_price` sensor lambda
+- `tomorrow_current_hourly_price` sensor lambda
+- `tomorrow_next_hourly_price` sensor lambda
+
+---
+
+#### Bug 3 — Fall-back day (25-hour) hourly average missed the repeated 02:xx block (minor)
+
+**Symptom:** On the DST fall-back day (last Sunday of October, 25 local hours,
+up to 100 price entries), the hourly average for the 02:xx hour was wrong and
+the daily min/max/average could misidentify the cheapest or most expensive hour.
+The JSON hourly sensors showed incorrect data for that one hour.
+
+**Root cause:** `hourly_avg_prices_kwh` and `tomorrow_hourly_avg_prices_kwh`
+were `std::vector<float>(24, 0.0f)`. The `recompute_today` and `recompute_tomorrow`
+scripts populated these by mapping each entry to slot `tm_hour` (0–23). On
+fall-back day there are two 02:xx blocks; the second overwrote the first in
+slot `[2]`.
+
+The sensor lambdas for `today_current_hourly_price`, `today_next_hourly_price`,
+`tomorrow_current_hourly_price`, and `tomorrow_next_hourly_price` also indexed
+the vector by `tmi->tm_hour`, giving the same slot-collision for both 02:xx
+blocks.
+
+**Fix:** The hourly vectors are expanded to 25 slots (`std::vector<float>(25, 0.0f)`)
+and populated by **sequential hour-block index** rather than raw `tm_hour`. A
+block counter increments each time the hour value changes from the previous
+entry. On a normal 24-hour day the indices are 0–23 (identical to before); on a
+fall-back 25-hour day they are 0–24 with both 02:xx blocks getting separate
+correct slots.
+
+The four hourly sensor lambdas use the same sequential block-index scan to find
+the correct slot for the current timestamp.
+
+**Changed locations in `eprices.yaml`:**
+- `globals:` — `hourly_avg_prices_kwh` and `tomorrow_hourly_avg_prices_kwh` size changed from `24` to `25`
+- `recompute_today` — hourly vector population uses sequential block counter
+- `recompute_tomorrow` — hourly vector population uses sequential block counter
+- `today_current_hourly_price` sensor lambda — sequential block-index lookup
+- `today_next_hourly_price` sensor lambda — sequential block-index lookup
+- `tomorrow_current_hourly_price` sensor lambda — sequential block-index lookup
+- `tomorrow_next_hourly_price` sensor lambda — sequential block-index lookup
+
 ## v1.2.4 — 2026-09-22
 
 ### Force button NVS cache bypass

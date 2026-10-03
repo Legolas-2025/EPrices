@@ -1,5 +1,49 @@
 # EPrices – Version History
 
+## v1.3.0 — 2026-10-03
+
+Complete DST hardening. No new sensors, no secrets changes, no entity ID
+changes. Drop-in replacement for v1.2.4.
+
+### All three DST edge cases fixed
+
+#### Bug 1 — `+86400` UTC seconds for tomorrow's date (moderate)
+
+On spring-forward Saturday evening after ~23:00 CET, adding exactly 86 400
+UTC seconds to compute "tomorrow's date" landed on Monday instead of Sunday
+(25 local hours span the DST boundary). This caused the tomorrow fetch URL,
+NVS expected-date check, and `tomorrow_date_str` to all contain the wrong
+date, making the fetch return no data or the wrong day's data.
+
+Fixed in all three locations (`nvs_load_tomorrow_script`,
+`parse_energy_charts_tomorrow_script`, `smart_tomorrow_price_update`) by using
+calendar-day increment (`tm_mday += 1` + `mktime()`) with a midday anchor
+instead of UTC-second arithmetic.
+
+#### Bug 2 — `+86400` in tomorrow sensor lookup anchor (minor)
+
+The four "Tomorrow" live sensors used `now + 86400` as the binary-search anchor
+into `price_timestamps_tomorrow`. On DST transition nights this was ~1 hour off
+from "same local time tomorrow", selecting the wrong 15-minute price slot.
+
+Fixed in all four sensor lambdas by computing the anchor via calendar-day
+increment.
+
+#### Bug 3 — Fall-back day 25-hour hourly average (minor)
+
+On the DST fall-back day (25 local hours), the `hourly_avg_prices_kwh` vector
+(24 slots, indexed by `tm_hour`) received two writes to slot `[2]` — the second
+02:xx block overwrote the first. Hourly average, min/max, and JSON data for the
+02:xx hour were wrong.
+
+Fixed by expanding the hourly vectors to 25 slots and populating by sequential
+hour-block index rather than raw `tm_hour`. The four hourly sensor lambdas use
+the same sequential scan. Normal 24-hour days are completely unaffected.
+
+See `CHANGELOG.md` for full implementation details.
+
+---
+
 ## v1.2.4 — 2026-09-22
 
 Bug-fix release. No new sensors, no secrets changes, no entity ID changes.
