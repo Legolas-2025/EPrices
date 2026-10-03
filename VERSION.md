@@ -3,7 +3,7 @@
 ## v1.3.0 — 2026-10-03
 
 Complete DST hardening. No new sensors, no secrets changes, no entity ID
-changes. Drop-in replacement for v1.2.4.
+changes. Drop-in replacement for v1.2.4 (migrating to v1.3.0 requires no changes to eprices_nvs.h file).
 
 ### All three DST edge cases fixed
 
