@@ -1,5 +1,33 @@
 # EPrices – Changelog
 
+## v1.3.1 — 2026-10-04
+
+### Hourly JSON trailing null-slot fix
+
+Bug-fix release addressing a regression introduced in v1.3.0. No NVS changes,
+no entity ID changes, no secrets changes. Drop-in replacement for v1.3.0.
+
+**Symptom:** `Today JSON Hourly Prices EUR⁄kWh` and `Tomorrow JSON Hourly Prices EUR⁄kWh`
+could publish a 25-element JSON array on normal 24-hour days, with the 25th
+element as `null`. Downstream HA template sensors doing arithmetic (`| sum`,
+`| from_json | sum`) could fail with `TypeError` and become unavailable.
+
+**Root cause:** In v1.3.0, hourly vectors were expanded to 25 slots for DST
+fall-back correctness. The JSON emission loop iterated the full 25-slot
+allocation instead of the actual populated sequential hour-block count for that
+day.
+
+**Fix:** `recompute_today` and `recompute_tomorrow` now track
+`actual_hour_blocks` from the sequential block-index scan and emit hourly JSON
+using only populated slots (`0..actual_hour_blocks-1`).
+- Normal day: 24 elements
+- DST spring-forward day: 23 elements
+- DST fall-back day: 25 elements
+
+**Changed locations in `eprices.yaml`:**
+- `recompute_today`
+- `recompute_tomorrow`
+
 ## v1.3.0 — 2026-10-03
 
 ### DST edge-case hardening — all three DST bugs fixed
@@ -566,7 +594,7 @@ eprices_vat_rate          # e.g. "0.22"  (VAT rate as decimal multiplier)
 
 | Name | Entity ID | Notes |
 |---|---|---|
-| Today JSON Hourly Prices EUR⁄kWh | `sensor.eprices_today_json_hourly_prices_eur_kwh` | JSON array, 24 values; `""` when no data |
+| Today JSON Hourly Prices EUR⁄kWh | `sensor.eprices_today_json_hourly_prices_eur_kwh` | JSON array, 23–25 values depending on DST (24 on normal days); `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array, 32 values; `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array, 32 values; `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array, 32 values; `""` when no data |
@@ -581,7 +609,7 @@ eprices_vat_rate          # e.g. "0.22"  (VAT rate as decimal multiplier)
 | Today Price Update Status Message | `sensor.eprices_today_price_update_status_message` | Detailed status string; diagnostic |
 | Today API Fetch Attempts | `sensor.eprices_today_api_fetch_attempts` | HTTP fetch count; resets at midnight; diagnostic |
 | Today Entry Count | `sensor.eprices_today_entry_count` | Number of stored price points; diagnostic |
-| Tomorrow JSON Hourly Prices EUR⁄kWh | `sensor.eprices_tomorrow_json_hourly_prices_eur_kwh` | JSON array, 24 values; `""` when no data |
+| Tomorrow JSON Hourly Prices EUR⁄kWh | `sensor.eprices_tomorrow_json_hourly_prices_eur_kwh` | JSON array, 23–25 values depending on DST (24 on normal days); `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array, 32 values; `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array, 32 values; `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array, 32 values; `""` when no data |
