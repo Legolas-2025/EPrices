@@ -226,7 +226,7 @@ time. Hourly averages use a 25-slot sequential hour-block model, so both
 
 | Sensor | Entity ID | Description |
 |---|---|---|
-| Today JSON Hourly Prices EUR⁄kWh | `sensor.eprices_today_json_hourly_prices_eur_kwh` | JSON array of hourly averages (25 slots; all hour blocks on fall-back day); `""` when no data |
+| Today JSON Hourly Prices EUR⁄kWh | `sensor.eprices_today_json_hourly_prices_eur_kwh` | JSON array of hourly averages (24 on normal days; 23 on spring-forward day; 25 on fall-back day); `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array of 32 prices; `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array of 32 prices; `""` when no data |
 | Today JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_today_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array of 32 prices; `""` when no data |
@@ -256,7 +256,7 @@ time. Hourly averages use a 25-slot sequential hour-block model, so both
 
 | Sensor | Entity ID | Description |
 |---|---|---|
-| Tomorrow JSON Hourly Prices EUR⁄kWh | `sensor.eprices_tomorrow_json_hourly_prices_eur_kwh` | JSON array of hourly averages (25 slots; all hour blocks on fall-back day); `""` when no data |
+| Tomorrow JSON Hourly Prices EUR⁄kWh | `sensor.eprices_tomorrow_json_hourly_prices_eur_kwh` | JSON array of hourly averages (24 on normal days; 23 on spring-forward day; 25 on fall-back day); `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P1 00:00-07:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p1_00_00_07_45` | JSON array of 32 prices; `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P2 08:00-15:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p2_08_00_15_45` | JSON array of 32 prices; `""` when no data |
 | Tomorrow JSON 15-Min Prices EUR⁄kWh (P3 16:00-23:45) | `sensor.eprices_tomorrow_json_15_min_prices_eur_kwh_p3_16_00_23_45` | JSON array of 32 prices; `""` when no data |

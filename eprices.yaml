@@ -1,8 +1,17 @@
 # =============================================================================
-# ESPHome: EPrices v1.3.0
+# ESPHome: EPrices v1.3.1
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.3.1 hourly JSON null-slot fix (2026-10-04):
+# - recompute_today and recompute_tomorrow now emit only the actual number of
+#   populated hour-block slots in the hourly JSON arrays instead of always
+#   emitting all 25 allocated slots. On normal 24-hour days this produces a
+#   24-element array (no trailing null). On the DST fall-back day (25 h) it
+#   produces 25 elements. On the DST spring-forward day (23 h) it produces 23.
+#   Fixes TypeError crashes in downstream HA template sensors that use | sum
+#   or arithmetic on the JSON array.
 #
 # v1.3.0 DST hardening (2026-10-03):
 # - Bug 1 fixed (3 locations): all "tomorrow date" calculations now use
@@ -1795,29 +1804,37 @@ script:
 
           // v1.2.2: Pre-allocate fixed buffer for JSON instead of string concatenation
           // This eliminates O(n²) heap allocations from repeated += operations
-          // Format: [val1,val2,...,val25] where val can be "null" or a float
+          int actual_hour_blocks = hour_block + 1;
+          if (actual_hour_blocks < 0) actual_hour_blocks = 0;
+          if (actual_hour_blocks > 25) actual_hour_blocks = 25;
+
+          // Format: [val1,val2,...] where val is a float
           // Max size: 25 * 12 (max float string) + 26 (commas/brackets) + 1 = ~330 bytes
           char json_h_buf[400];
           int json_h_len = 0;
           json_h_buf[json_h_len++] = '[';
 
-          for (int i = 0; i < 25; i++) {
-            if (h_cnt[i] > 0) {
-              float ha = h_sums[i] / (float)h_cnt[i];
-              id(hourly_avg_prices_kwh)[i] = ha;
-              if (ha < h_min_v) { h_min_v = ha; h_min_i = i; }
-              if (ha > h_max_v) { h_max_v = ha; h_max_i = i; }
-              // Use snprintf into fixed buffer instead of string +=
-              int written = snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "%.4f", ha);
-              json_h_len += written;
-              raw_sum += ha; cnt_kwh++;
-            } else {
+          for (int i = 0; i < actual_hour_blocks; i++) {
+            if (h_cnt[i] <= 0) {
               id(hourly_avg_prices_kwh)[i] = NAN;
-              json_h_len += snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "null");
+              continue;
             }
-            if (i < 24) {
+
+            float ha = h_sums[i] / (float)h_cnt[i];
+            id(hourly_avg_prices_kwh)[i] = ha;
+            if (ha < h_min_v) { h_min_v = ha; h_min_i = i; }
+            if (ha > h_max_v) { h_max_v = ha; h_max_i = i; }
+            // Use snprintf into fixed buffer instead of string +=
+            int written = snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "%.4f", ha);
+            json_h_len += written;
+            raw_sum += ha; cnt_kwh++;
+
+            if (i < actual_hour_blocks - 1) {
               json_h_buf[json_h_len++] = ',';
             }
+          }
+          for (int i = actual_hour_blocks; i < 25; i++) {
+            id(hourly_avg_prices_kwh)[i] = NAN;
           }
           json_h_buf[json_h_len++] = ']';
           json_h_buf[json_h_len] = '\0';
@@ -1958,26 +1975,34 @@ script:
 
           // v1.2.2: Pre-allocate fixed buffer for JSON instead of string concatenation
           // This eliminates O(n²) heap allocations from repeated += operations
+          int actual_hour_blocks = hour_block + 1;
+          if (actual_hour_blocks < 0) actual_hour_blocks = 0;
+          if (actual_hour_blocks > 25) actual_hour_blocks = 25;
+
           char json_h_buf[400];
           int json_h_len = 0;
           json_h_buf[json_h_len++] = '[';
 
-          for (int i = 0; i < 25; i++) {
-            if (h_cnt[i] > 0) {
-              float ha = h_sums[i] / (float)h_cnt[i];
-              id(tomorrow_hourly_avg_prices_kwh)[i] = ha;
-              if (ha < h_min_v) { h_min_v = ha; h_min_i = i; }
-              if (ha > h_max_v) { h_max_v = ha; h_max_i = i; }
-              int written = snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "%.4f", ha);
-              json_h_len += written;
-              raw_sum += ha; cnt_kwh++;
-            } else {
+          for (int i = 0; i < actual_hour_blocks; i++) {
+            if (h_cnt[i] <= 0) {
               id(tomorrow_hourly_avg_prices_kwh)[i] = NAN;
-              json_h_len += snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "null");
+              continue;
             }
-            if (i < 24) {
+
+            float ha = h_sums[i] / (float)h_cnt[i];
+            id(tomorrow_hourly_avg_prices_kwh)[i] = ha;
+            if (ha < h_min_v) { h_min_v = ha; h_min_i = i; }
+            if (ha > h_max_v) { h_max_v = ha; h_max_i = i; }
+            int written = snprintf(json_h_buf + json_h_len, sizeof(json_h_buf) - json_h_len, "%.4f", ha);
+            json_h_len += written;
+            raw_sum += ha; cnt_kwh++;
+
+            if (i < actual_hour_blocks - 1) {
               json_h_buf[json_h_len++] = ',';
             }
+          }
+          for (int i = actual_hour_blocks; i < 25; i++) {
+            id(tomorrow_hourly_avg_prices_kwh)[i] = NAN;
           }
           json_h_buf[json_h_len++] = ']';
           json_h_buf[json_h_len] = '\0';

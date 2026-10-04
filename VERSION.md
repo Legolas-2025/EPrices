@@ -1,5 +1,25 @@
 # EPrices – Version History
 
+## v1.3.1 — 2026-10-04
+
+Bug-fix release for hourly JSON output length. No new sensors, no secrets
+changes, no entity ID changes. Drop-in replacement for v1.3.0 (no
+`eprices_nvs.h` changes required).
+
+### Hourly JSON now emits populated block count (23/24/25), no trailing null slot
+
+v1.3.0 expanded hourly vectors to 25 slots to preserve the repeated hour on DST
+fall-back day. The hourly JSON builders in `recompute_today` and
+`recompute_tomorrow` still iterated all 25 allocated slots, which could emit a
+trailing `null` on normal 24-hour days and break downstream HA template sensor
+arithmetic.
+
+Fixed by tracking the actual sequential hour-block count and publishing only
+those populated blocks:
+- normal day: 24 values
+- DST spring-forward day: 23 values
+- DST fall-back day: 25 values
+
 ## v1.3.0 — 2026-10-03
 
 Complete DST hardening. No new sensors, no secrets changes, no entity ID
