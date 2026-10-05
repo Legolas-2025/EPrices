@@ -22,8 +22,9 @@ Assistant automations are required for any core functionality.
   for use in HA automations and dashboards
 - **NVS persistence** — prices survive device reboots without re-fetching
 - **Midnight bridge** — tomorrow's data automatically becomes today at 00:00, fully on-device
-- **Auto-retry logic** — up to 8 HTTP fetch attempts for both today and tomorrow,
-  with a **120-second stuck-fetch watchdog** that unblocks retries after TCP-level stalls
+- **Auto-retry logic** — up to 26 HTTP fetch attempts per day for today and up to
+  12 scheduled attempts plus 30-minute self-heal for tomorrow, with a **120-second
+  stuck-fetch watchdog** that unblocks retries after TCP-level stalls
 - **Force buttons always fetch from API** — "Force Today's Update" and "Force
   Tomorrow's Update" clear the NVS cache before fetching, guaranteeing a real
   HTTP call regardless of what is stored locally
@@ -142,9 +143,12 @@ For the full list see the [Energy-Charts API documentation](https://api.energy-c
 |---|---|
 | Boot | Load today + tomorrow from NVS flash; HTTP fetch if NVS miss or stale |
 | 00:00 midnight | Promote tomorrow → today; clear tomorrow; schedule tomorrow fetch if in window |
-| 00:05, 00:15, 00:30, then hourly :30 | Auto-retry today fetch if previous attempt failed (max 8) |
+| 00:05, 00:15, 00:30 | Burst auto-retry for today (3 attempts) |
+| 01:30 – 23:30 hourly :30 | Continue today fetch every hour until success (up to 26 total attempts per day); stops immediately on success |
 | 13:25 | First auto-fetch attempt for tomorrow |
-| 13:55, 14:55 … 19:55 | Retry tomorrow fetch if previous attempt failed (max 8 total) |
+| 13:55, 14:55 … 22:55 hourly :55 | Retry tomorrow fetch every hour (up to 11 scheduled attempts) |
+| 23:15 | Last-chance tomorrow attempt |
+| Worker loop (every 10 s) | Self-heal: if no tomorrow data and last attempt was >30 min ago, re-arm fetch automatically until 23:50 (not counted against the 12 scheduled attempts; disabled after a manual clear) |
 | Manual button press | Force immediate fetch for today or tomorrow |
 
 ### Stuck-fetch watchdog
@@ -196,9 +200,11 @@ is discarded and a fresh HTTP fetch is triggered automatically.
 
 ### DST safety
 
-All price indexing uses UNIX timestamps and binary search, and all "tomorrow"
-date arithmetic now uses calendar-day increment (`tm_mday += 1` with
-`mktime()`) instead of `+86400` UTC-second arithmetic. This fixes
+All price indexing uses UNIX timestamps and binary search, and every "tomorrow"
+date calculation uses calendar-day increment (`tm_mday += 1` with
+`mktime()`) instead of `+86400` UTC-second arithmetic — the fetch URL, the NVS
+expected-date check, the four live Tomorrow sensor anchors and the
+`Tomorrow Current Price Status` anchor inside `recompute_tomorrow`. This fixes
 spring-forward edge cases and keeps tomorrow lookups aligned to same local
 time. Hourly averages use a 25-slot sequential hour-block model, so both
 02:xx blocks on the fall-back day are preserved correctly.
@@ -284,7 +290,7 @@ time. Hourly averages use a 25-slot sequential hour-block model, so both
 | Today Last API Fetch Time | `sensor.eprices_today_last_api_fetch_time` | Timestamp of last successful HTTP fetch for today; `Never` if NVS only |
 | Tomorrow Last API Fetch Time | `sensor.eprices_tomorrow_last_api_fetch_time` | Timestamp of last successful HTTP fetch for tomorrow; `Never` if NVS only |
 | Today API Fetch Attempts | `sensor.eprices_today_api_fetch_attempts` | HTTP fetch attempt count for today; resets at midnight |
-| Tomorrow API Fetch Attempts | `sensor.eprices_tomorrow_api_fetch_attempts` | HTTP fetch attempt count for tomorrow; resets at 13:25 |
+| Tomorrow API Fetch Attempts | `sensor.eprices_tomorrow_api_fetch_attempts` | Total HTTP fetch attempt count for tomorrow — scheduled, worker self-heal and manual button presses; resets at 13:25 |
 | Today Price Update Status | `sensor.eprices_today_price_update_status` | `SUCCESS` / `FAILED/WAITING` |
 | Tomorrow Price Update Status | `sensor.eprices_tomorrow_price_update_status` | `SUCCESS` / `FAILED/WAITING` |
 | Today Price Update Status Message | `sensor.eprices_today_price_update_status_message` | Detailed status string |
@@ -295,7 +301,7 @@ time. Hourly averages use a 25-slot sequential hour-block model, so both
 | Button | Entity ID | Description |
 |---|---|---|
 | Force Today's Update | `button.eprices_force_today_s_update` | Clear today NVS cache and trigger immediate HTTP fetch |
-| Force Tomorrow's Update | `button.eprices_force_tomorrow_s_update` | Clear tomorrow NVS cache and trigger immediate HTTP fetch (window: 13:20–23:50) |
+| Force Tomorrow's Update | `button.eprices_force_tomorrow_s_update` | Clear tomorrow NVS cache and trigger immediate HTTP fetch (window: 13:20–23:50). Clearing also suspends the 30-minute self-heal until the next real fetch |
 | Reboot Device | `button.eprices_reboot_device` | Restart the ESP32 |
 
 ---
