@@ -1,5 +1,198 @@
 # EPrices – Changelog
 
+## v1.4.0 — 2026-10-06
+
+### Full-day retry coverage for today and tomorrow
+
+Reliability release addressing a production-observed gap where the Energy-Charts
+API being offline for more than ~5 hours left the device with no automatic
+recovery path for the remainder of the day. No new sensors, no secrets changes,
+no entity ID changes. Drop-in replacement for v1.3.1. `eprices_nvs.h` unchanged.
+
+#### Today: burst exhaustion no longer deactivates auto-retry
+
+**Symptom:** if the API was down at midnight, the 8-burst auto-retry (00:05,
+00:15, 00:30, then hourly :30) exhausted by ~05:30. `auto_today_retry_active`
+was set to `false`, every subsequent hourly `:30` trigger returned immediately,
+and no today fetch was attempted again until the next midnight bridge or a
+manual button press — a gap of up to 18 hours.
+
+**Root cause:** `after_today_fetch` failure branch set
+`auto_today_retry_active = false` unconditionally after 8 consecutive failures.
+All `on_time` triggers begin with `if (!auto_today_retry_active) return;`.
+
+**Fix:** the failure branch now resets `auto_today_retry_count` to `0` and
+leaves `auto_today_retry_active` at `true`. The existing hourly `:30` trigger
+fires every hour for the rest of the day. After another 8 consecutive failures
+the counter resets again, cycling until success or midnight. Maximum 26 attempts
+per day (3 burst + 23 hourly). On success, `auto_today_retry_active = false` as
+before — all triggers stop.
+
+**Changed location in `eprices.yaml`:**
+- `after_today_fetch` script, `else` branch — replaced
+  `id(auto_today_retry_active) = false;` with
+  `id(auto_today_retry_count) = 0;` and updated status message
+
+---
+
+#### Tomorrow: retry window extended from 19:55 to 23:15
+
+**Symptom:** the hourly `:55` retry trigger was gated to `t.hour > 19` →
+`return`. The last scheduled attempt was at 19:55. The fetch window extends to
+23:50, but no trigger fired between 20:00 and 23:50. If the API recovered at
+20:30, the next attempt was the following day at 13:25.
+
+**Fix (three parts):**
+
+1. The hourly `:55` gate is widened from `t.hour > 19` to `t.hour > 22`,
+   covering 14:55 through 22:55 (nine scheduled attempts instead of five).
+
+2. The attempt cap in the 13:55 and hourly `:55` triggers is raised from 8 to
+   12, so the widened gate can actually be reached (see the counter-split
+   section below — without this the cap stops the chain at 16:55).
+
+3. A new `on_time` trigger at 23:15 provides a last-chance attempt
+   (`tomorrow_retry_count` cap 12).
+
+**Changed locations in `eprices.yaml`:**
+- Tomorrow hourly `:55` `on_time` trigger lambda — gate `t.hour > 19` → `t.hour > 22`
+- 13:55 and hourly `:55` triggers — cap `>= 8` → `>= 12`
+- New `on_time` entry at `seconds: 15, minutes: 15, hours: 23`
+
+---
+
+#### Tomorrow: scheduled-attempt counter split from fetch counter
+
+**Symptom:** `tomorrow_retry_count` was incremented by both the `on_time`
+triggers and by `smart_tomorrow_price_update`, so every scheduled attempt
+counted twice. The counter climbed by 2 per attempt and stood at 9 after
+16:55, so the `>= 8` cap in the hourly `:55` trigger blocked every attempt
+from 17:55 onward. Only five scheduled attempts (13:25, 13:55, 14:55, 15:55,
+16:55) ever fired — in v1.3.1 and in the first draft of v1.4.0. Widening the
+gate alone would have had no effect. The double-increment was introduced in
+v1.2.0.
+
+**Root cause:** one variable served two incompatible purposes — the scheduled
+attempt budget (trigger-side) and the `Tomorrow API Fetch Attempts` sensor
+value (script-side). Once the v1.4.0 worker self-heal began invoking the script
+outside the schedule, the two roles could no longer share a variable.
+
+**Fix:** the two roles are split.
+
+| Variable | Incremented by | Purpose |
+|---|---|---|
+| `tomorrow_retry_count` | `on_time` triggers only | Budget for scheduled attempts; caps at 12 |
+| `tomorrow_fetch_count` | `smart_tomorrow_price_update` | Every HTTP fetch; drives the sensor |
+
+Worker self-heal and manual button presses now increment `tomorrow_fetch_count`
+only, so they no longer consume the scheduled budget.
+
+**Changed locations in `eprices.yaml`:**
+- `globals:` — added `tomorrow_fetch_count`
+- 13:25 trigger — resets both counters and increments `tomorrow_retry_count` for attempt #1
+- `smart_tomorrow_price_update` — increments `tomorrow_fetch_count` instead of `tomorrow_retry_count`
+- `Tomorrow API Fetch Attempts` sensor lambda — reads `tomorrow_fetch_count`
+- `midnight_bridge_promotion` — resets both counters at the day rollover
+- `boot_recovery_tomorrow_script` — seeds the sensor with the counter's current
+  value instead of forcing it to 0. `tomorrow_fetch_count` is a global already
+  initialised to 0 at boot, so no reset is needed there; forcing 0 would erase a
+  fetch that a scheduled trigger completed in the first 50 s after a reboot
+  (the `on_boot` recovery runs at `+50 s`, while `on_time` triggers can fire
+  from `+0 s`). Observed on a device rebooted at 23:14:50: the 23:15
+  last-chance trigger fetched successfully at 23:15:24 and the sensor showed
+  `1`, then boot recovery republished `0` at 23:15:51.
+
+---
+
+#### Tomorrow worker: 30-minute self-heal re-arm
+
+**Purpose:** even with the extended scheduled triggers, if the API recovers
+between 23:15 and 23:50 (after the last scheduled trigger), no code path
+re-arms `need_tomorrow_update`. The worker loop processes the flag but nothing
+sets it.
+
+**Fix:** the existing 10-second worker lambda now includes a self-heal check.
+If `tomorrow_entry_count == 0`, `tomorrow_last_update_success == false`,
+`is_updating_tomorrow == false`, the fetch window is open, and the last
+attempt was more than 30 minutes ago, the worker sets
+`need_tomorrow_update = true` automatically. The 30-minute gap is the throttle;
+no hard cap is needed for this phase.
+
+**Changed location in `eprices.yaml`:**
+- Tomorrow `seconds: /10` worker lambda — self-heal block inserted between
+  the stuck-flag watchdog and the `need_tomorrow_update` processing
+
+---
+
+#### Manual "clear" is no longer undone by the self-heal
+
+**Symptom:** `clear_tomorrow_prices` (used by the "Force Tomorrow's Update"
+button, the "Clear Tomorrow" action and the midnight bridge) zeroes
+`tomorrow_entry_count` but left `tomorrow_last_update_attempt` untouched. The
+self-heal block uses that timestamp as its throttle reference, so if the
+previous attempt was more than 30 minutes old the next 10-second worker tick
+re-armed the fetch and silently repopulated the data the user had just cleared.
+
+**Fix:** `clear_tomorrow_prices` now also zeroes `tomorrow_last_update_attempt`,
+which disables the self-heal until a real fetch attempt happens. Clearing is
+now stable; recovery resumes at the next 13:25 scheduled attempt or on a manual
+force press.
+
+**Changed location in `eprices.yaml`:**
+- `clear_tomorrow_prices` script — added `id(tomorrow_last_update_attempt) = 0;`
+
+---
+
+#### DST follow-up: `recompute_tomorrow` status anchor
+
+**Symptom:** v1.3.0 replaced the `now + 86400` anchor with calendar-day
+increment in the four Tomorrow sensor lambdas, but the equivalent line inside
+`recompute_tomorrow` — which decides whether `Tomorrow Current Price Status`
+reads `Valid` or `Missing` — still used the raw UTC offset.
+
+**Fix:** that anchor now uses the same `tm_mday += 1` + `mktime()` calendar-day
+increment. Low practical impact (the status would not have flipped to
+`Missing` in normal operation), but it removes the last `+86400` leftover and
+keeps the tomorrow-date arithmetic uniform across the file.
+
+**Changed location in `eprices.yaml`:**
+- `recompute_tomorrow` script — `int64_t ts_now_tomorrow` now derived via
+  `localtime_r` + `tm_mday += 1` + `mktime()`
+
+---
+
+#### Retry schedule summary (v1.4.0)
+
+**Today:**
+
+Note: `auto_today_retry_count` cycles 0-7 and is reset to 0 each time the burst
+is exhausted, so the numbers below are cumulative attempts for the day, not the
+value of the counter.
+
+| Time | Attempt of day | Phase |
+|---|---|---|
+| 00:05 | #1 | burst |
+| 00:15 | #2 | burst |
+| 00:30 | #3 | burst |
+| 01:30 – 05:30 | #4–#8 | hourly :30 |
+| *(counter resets, retry stays active)* | | |
+| 06:30 – 23:30 | #9–#26 | hourly :30 (slow recovery) |
+| any success | — | all retries stop |
+
+**Tomorrow:**
+
+| Time | Scheduled attempt | Phase |
+|---|---|---|
+| 13:25 | #1 | scheduled |
+| 13:55 | #2 | scheduled |
+| 14:55 – 22:55 | #3–#11 | hourly :55 |
+| 23:15 | #12 | last-chance |
+| *(worker self-heal)* | not counted | every 30 min if no data, in window, >30 min since last try |
+| any success | — | all retries stop |
+
+Self-heal fetches are counted by `tomorrow_fetch_count` (the `Tomorrow API Fetch
+Attempts` sensor) but do not consume the #1–#12 scheduled budget.
+
 ## v1.3.1 — 2026-10-04
 
 ### Hourly JSON trailing null-slot fix
@@ -116,24 +309,62 @@ The sensor lambdas for `today_current_hourly_price`, `today_next_hourly_price`,
 the vector by `tmi->tm_hour`, giving the same slot-collision for both 02:xx
 blocks.
 
-**Fix:** The hourly vectors are expanded to 25 slots (`std::vector<float>(25, 0.0f)`)
-and populated by **sequential hour-block index** rather than raw `tm_hour`. A
-block counter increments each time the hour value changes from the previous
-entry. On a normal 24-hour day the indices are 0–23 (identical to before); on a
-fall-back 25-hour day they are 0–24 with both 02:xx blocks getting separate
-correct slots.
+**Fix (two parts, both required):**
 
-The four hourly sensor lambdas use the same sequential block-index scan to find
-the correct slot for the current timestamp.
+1. The hourly vectors are expanded to 25 slots
+   (`std::vector<float>(25, 0.0f)`) so a 25-hour day cannot overflow them.
+
+2. They are populated by **sequential hour-block index** rather than raw
+   `tm_hour`, and the block counter additionally advances when `tm_isdst`
+   changes:
+
+   ```cpp
+   if (tmi.tm_hour != prev_hour || tmi.tm_isdst != prev_dst) {
+     hour_block++;
+     prev_hour = tmi.tm_hour;
+     prev_dst  = tmi.tm_isdst;
+   }
+   ```
+
+   **Part 2 is what actually fixes this bug.** On a fall-back day the local
+   hours run `00, 01, 02, 02, 03 …` and the second `02:xx` block carries the
+   same `tm_hour` as the first, so a `tm_hour`-only comparison leaves the
+   counter unchanged and merges both hours into one block — 24 blocks instead
+   of 25, with block 2 holding all eight quarter-hours and reporting the mean
+   of two different hours. Comparing `tm_isdst` distinguishes `02:00 CEST` from
+   `02:00 CET`, producing the intended 0–24 range with both `02:xx` blocks in
+   separate slots.
+
+The four hourly sensor lambdas use the same `tm_isdst`-aware block-index scan to
+locate the slot for the current timestamp, so during both 02:00–02:59 windows on
+a fall-back day they report that hour's own average rather than a blend of the
+two.
+
+**Verified block counts** (`Europe/Ljubljana`). The API anchors `start`/`end` to
+the *local* day of the bidding zone, so it returns 92 / 96 / 100 entries on a
+spring-forward / normal / fall-back day:
+
+| Day | API entries | Before | After |
+|---|---|---|---|
+| Spring forward (23 h) | 92 | 23 | 23 |
+| Fall back (25 h) | 100 | 24 ✗ | **25** |
+| Normal (24 h) | 96 | 24 | 24 |
+
+**Known limitation (unchanged):** the legacy 96-slot 15-minute grid
+(`hourly_prices` / `tomorrow_hourly_prices`) maps both `02:xx` occurrences to
+slots 8–11, so on a fall-back day the second overwrites the first. That grid is
+a 24-hour wall-clock view by contract and is used only by the 15-minute JSON
+sensors and the 15-minute min/max time strings. The live 15-minute sensors read
+`price_timestamps_today[]` directly and are unaffected.
 
 **Changed locations in `eprices.yaml`:**
 - `globals:` — `hourly_avg_prices_kwh` and `tomorrow_hourly_avg_prices_kwh` size changed from `24` to `25`
-- `recompute_today` — hourly vector population uses sequential block counter
-- `recompute_tomorrow` — hourly vector population uses sequential block counter
-- `today_current_hourly_price` sensor lambda — sequential block-index lookup
-- `today_next_hourly_price` sensor lambda — sequential block-index lookup
-- `tomorrow_current_hourly_price` sensor lambda — sequential block-index lookup
-- `tomorrow_next_hourly_price` sensor lambda — sequential block-index lookup
+- `recompute_today` — hourly vector population uses a `tm_isdst`-aware block counter
+- `recompute_tomorrow` — hourly vector population uses a `tm_isdst`-aware block counter
+- `today_current_hourly_price` sensor lambda — `tm_isdst`-aware block-index lookup
+- `today_next_hourly_price` sensor lambda — `tm_isdst`-aware block-index lookup
+- `tomorrow_current_hourly_price` sensor lambda — `tm_isdst`-aware block-index lookup
+- `tomorrow_next_hourly_price` sensor lambda — `tm_isdst`-aware block-index lookup
 
 ## v1.2.4 — 2026-09-22
 
