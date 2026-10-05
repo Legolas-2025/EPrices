@@ -1,5 +1,102 @@
 # EPrices – Version History
 
+## v1.4.0 — 2026-10-06
+
+Reliability release expanding the API retry coverage window for both today
+and tomorrow. No new sensors, no secrets changes, no entity ID changes.
+Drop-in replacement for v1.3.1. No `eprices_nvs.h` changes required.
+
+### Today auto-retry now covers the full 24-hour day
+
+Previously, the today auto-retry burst (00:05, 00:15, 00:30 + hourly :30)
+capped at 8 attempts, exhausting by ~05:30. After that,
+`auto_today_retry_active` was set to `false` and every remaining hourly
+trigger returned immediately — leaving 18 hours with zero retry coverage.
+If the API was down overnight, no automatic recovery was possible until the
+next midnight bridge or a manual button press.
+
+**Fix:** when the 8-attempt burst is exhausted, the counter resets to 0 and
+`auto_today_retry_active` stays `true`. The existing hourly `:30` trigger
+continues firing every hour for the rest of the day (up to 26 total attempts
+per day). On any success, `auto_today_retry_active` is set to `false` as
+before, stopping all further retries.
+
+### Tomorrow retry window extended to 23:15
+
+The hourly `:55` retry trigger was gated to `hour ≤ 19`, cutting off at
+19:55 despite the fetch window extending to 23:50. Four hours of the window
+had no scheduled coverage.
+
+**Fix:** the gate is widened to `hour ≤ 22` (14:55 through 22:55, nine
+scheduled attempts) and the attempt cap in the 13:55 and hourly `:55` triggers
+is raised from 8 to 12 — without the cap change the chain still stopped at
+16:55. A new last-chance trigger at 23:15 provides a final attempt inside the
+window.
+
+### Tomorrow attempt counter split from fetch counter
+
+`tomorrow_retry_count` was being incremented by both the `on_time` triggers and
+`smart_tomorrow_price_update`, so every scheduled attempt counted twice and the
+`>= 8` cap blocked the retry chain from 17:55 onward — the widened window could
+never be reached. The double-increment was introduced in v1.2.0.
+
+The counter now has one owner each for its two jobs:
+
+- `tomorrow_retry_count` — incremented by the `on_time` triggers only; the
+  budget for the 12 scheduled attempts
+- `tomorrow_fetch_count` (new global) — incremented by
+  `smart_tomorrow_price_update`; drives the `Tomorrow API Fetch Attempts`
+  sensor
+
+Worker self-heal and manual button presses therefore no longer consume the
+scheduled attempt budget.
+
+### Manual clear is no longer undone by the self-heal
+
+`clear_tomorrow_prices` now also zeroes `tomorrow_last_update_attempt`, the
+self-heal throttle reference. Previously, clearing tomorrow's data could be
+silently undone within 30 minutes if the last attempt was older than that.
+
+### Tomorrow worker self-heal re-arm
+
+A new 30-minute self-heal check was added to the existing 10-second worker
+loop. If no tomorrow data exists, the last attempt was more than 30 minutes
+ago, and the fetch window is still open, the worker automatically re-arms
+`need_tomorrow_update`. This catches API recovery at any time during the
+window without relying on a scheduled trigger. The 30-minute gap is the
+natural throttle — no hard attempt cap needed for this phase.
+
+### Retry coverage comparison
+
+| Fetch | v1.3.1 coverage | v1.4.0 coverage |
+|---|---|---|
+| Today | 00:05 → 05:30 (8 attempts) | 00:05 → 23:30 (up to 26 attempts) |
+| Tomorrow | 13:25 → 16:55 (5 attempts) | 13:25 → 23:15 (12 scheduled) + 30-min self-heal until 23:50 |
+
+The v1.3.1 tomorrow figure is corrected here: the gate ran to 19:55, but the
+counter cap stopped real fetches at 16:55, so only five attempts occurred.
+
+### Changed locations in `eprices.yaml`
+
+- `after_today_fetch` script — failure branch: counter reset instead of
+  deactivation
+- Tomorrow hourly `:55` `on_time` trigger — gate widened from `hour ≤ 19`
+  to `hour ≤ 22`
+- 13:55 and hourly `:55` triggers — attempt cap raised from 8 to 12
+- New `on_time` trigger at 23:15 for last-chance tomorrow attempt
+- Tomorrow `seconds: /10` worker lambda — 30-min self-heal re-arm block
+  added before `need_tomorrow_update` processing
+- `globals:` — added `tomorrow_fetch_count`
+- 13:25 trigger, `smart_tomorrow_price_update`, `Tomorrow API Fetch Attempts`
+  sensor, `midnight_bridge_promotion` — split scheduled-attempt counting from
+  total-fetch counting
+- `boot_recovery_tomorrow_script` — publishes the counter's current value rather
+  than forcing it to 0, so a fetch completed by a trigger during the first 50 s
+  after a reboot is no longer erased from the sensor
+- `clear_tomorrow_prices` script — also zeroes `tomorrow_last_update_attempt`
+- `recompute_tomorrow` script — status anchor uses calendar-day increment
+  instead of `+86400`
+
 ## v1.3.1 — 2026-10-04
 
 Bug-fix release for hourly JSON output length. No new sensors, no secrets
@@ -56,9 +153,13 @@ On the DST fall-back day (25 local hours), the `hourly_avg_prices_kwh` vector
 02:xx block overwrote the first. Hourly average, min/max, and JSON data for the
 02:xx hour were wrong.
 
-Fixed by expanding the hourly vectors to 25 slots and populating by sequential
-hour-block index rather than raw `tm_hour`. The four hourly sensor lambdas use
-the same sequential scan. Normal 24-hour days are completely unaffected.
+Fixed by expanding the hourly vectors to 25 slots and populating them by
+sequential hour-block index rather than raw `tm_hour`. The block counter also
+advances when `tm_isdst` changes — that is what keeps the two `02:xx` blocks on
+a fall-back day separate, since a `tm_hour`-only comparison merges them and
+yields 24 blocks instead of 25. The four hourly sensor lambdas use the same
+`tm_isdst`-aware scan. Normal 24-hour days are completely unaffected: 23 blocks
+on spring-forward days, 25 on fall-back days.
 
 See `CHANGELOG.md` for full implementation details.
 
