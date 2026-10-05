@@ -1,8 +1,45 @@
 # =============================================================================
-# ESPHome: EPrices v1.3.1
+# ESPHome: EPrices v1.4.0
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.4.0 retry-window expansion (2026-10-06):
+# - Today auto-retry no longer deactivates after 8 burst attempts. The
+#   counter resets to 0 and the existing hourly :30 trigger continues
+#   firing every hour for the remainder of the day (up to 26 total
+#   attempts). On any success, auto_today_retry_active is set to false
+#   as before, stopping all further retries.
+# - Tomorrow hourly :55 retry trigger window extended from hour <= 19
+#   to hour <= 22, covering 14:55 through 22:55, and the scheduled-attempt
+#   cap raised from 8 to 12.
+# - New last-chance tomorrow trigger at 23:15 (scheduled attempt #12).
+# - Tomorrow worker loop gains a 30-minute self-heal re-arm: if no
+#   tomorrow data exists and the last attempt was >30 min ago, the
+#   worker re-arms need_tomorrow_update automatically. No hard cap on
+#   this phase; the 30-min gap is the throttle.
+# - FIX (counter split): tomorrow_retry_count was incremented twice per
+#   attempt - once by the on_time triggers and once by
+#   smart_tomorrow_price_update - so it climbed by 2 per attempt, hit the
+#   ">= 8" cap at ~16:55, and the widened window above was unreachable.
+#   (Introduced in v1.2.0; it also made the documented v1.3.1 schedule
+#   wrong - only 4 attempts really fired.) The two roles are now split:
+#     tomorrow_retry_count - incremented by the on_time triggers ONLY;
+#                            the 12-attempt scheduled budget (cap 12).
+#     tomorrow_fetch_count - NEW global, incremented by
+#                            smart_tomorrow_price_update; counts EVERY
+#                            HTTP fetch (scheduled trigger, worker
+#                            self-heal and manual button press) and drives
+#                            the "Tomorrow API Fetch Attempts" sensor.
+#   Worker self-heal and manual presses no longer consume the scheduled
+#   attempt budget, so the documented schedule is now the real schedule.
+# - FIX: clear_tomorrow_prices also zeroes tomorrow_last_update_attempt,
+#   so the 30-minute self-heal can no longer silently undo a manual clear.
+# - DST follow-up: the last remaining +86400 (the "Tomorrow Current Price
+#   Status" anchor inside recompute_tomorrow) now uses calendar-day
+#   increment, matching the other four tomorrow anchors.
+# - No new sensors, no secrets changes, no entity ID changes.
+#   Drop-in replacement for v1.3.1. eprices_nvs.h unchanged.
 #
 # v1.3.1 hourly JSON null-slot fix (2026-10-04):
 # - recompute_today and recompute_tomorrow now emit only the actual number of
@@ -331,6 +368,23 @@ time:
               bool in_window = (t.hour > 13 && t.hour < 23) ||
                                (t.hour == 13 && t.minute >= 20) ||
                                (t.hour == 23 && t.minute <= 50);
+
+              // v1.4.0: self-heal re-arm — if no tomorrow data and last
+              // attempt was >30 min ago, re-arm for another try.
+              // Only fires when not already updating, not already
+              // successful, and inside the fetch window.
+              if (!id(tomorrow_last_update_success) &&
+                  !id(is_updating_tomorrow) &&
+                  in_window &&
+                  id(tomorrow_entry_count) == 0 &&
+                  id(tomorrow_last_update_attempt) > 0) {
+                time_t now_ts = (time_t)id(ha_time).now().timestamp;
+                if (now_ts - id(tomorrow_last_update_attempt) > 1800) {
+                  ESP_LOGI("eprices", "Worker: re-arming tomorrow (no data, >30 min since last try)");
+                  id(need_tomorrow_update) = true;
+                }
+              }
+
               if (id(need_tomorrow_update) && !id(is_updating_tomorrow) && in_window) {
                 ESP_LOGI("eprices", "Worker: starting Tomorrow update");
                 id(need_tomorrow_update) = false;
@@ -409,17 +463,15 @@ time:
       # =============================================================================
       # AUTO TOMORROW FETCH SCHEDULER
       #
-      # Attempts (8 total):
-      #  1) 13:25
-      #  2) 13:55
-      #  3) 14:55
-      #  4) 15:55
-      #  5) 16:55
-      #  6) 17:55
-      #  7) 18:55
-      #  8) 19:55
+      # Scheduled attempts (12 total, counted by tomorrow_retry_count):
+      #   1) 13:25
+      #   2) 13:55
+      #   3)-11) 14:55 ... 22:55 (hourly)
+      #  12) 23:15  (last chance)
       #
-      # Stops after success, stops if an update is already running, and caps at 8.
+      # Stops after success, stops if an update is already running, and caps at
+      # 12. Independent of tomorrow_fetch_count, which counts every HTTP fetch
+      # (scheduled, worker self-heal and manual button) for the sensor.
       # =============================================================================
 
       # Attempt #1 at 13:25
@@ -436,8 +488,10 @@ time:
                 ESP_LOGI("eprices", "Auto tomorrow: already running at 13:25, skipping");
                 return;
               }
-              // Reset counter for today's auto schedule
+              // Reset counters for today's auto schedule
               id(tomorrow_retry_count) = 0;
+              id(tomorrow_fetch_count) = 0;
+              id(tomorrow_retry_count)++;  // scheduled attempt #1
               ESP_LOGI("eprices", "Auto tomorrow: attempt #1 at 13:25");
               id(smart_tomorrow_price_update).execute();
 
@@ -450,7 +504,7 @@ time:
               if (id(tomorrow_last_update_success)) return;
               if (id(is_updating_tomorrow)) return;
 
-              if (id(tomorrow_retry_count) >= 8) {
+              if (id(tomorrow_retry_count) >= 12) {
                 ESP_LOGW("eprices", "Auto tomorrow: max attempts reached (%d), stop retrying", id(tomorrow_retry_count));
                 return;
               }
@@ -466,13 +520,13 @@ time:
         then:
           - lambda: |-
               auto t = id(ha_time).now();
-              // Only run hourly retries between 14:00 and 19:59
-              if (t.hour < 14 || t.hour > 19) return;
+              // v1.4.0: run hourly retries between 14:00 and 22:59
+              if (t.hour < 14 || t.hour > 22) return;
 
               if (id(tomorrow_last_update_success)) return;
               if (id(is_updating_tomorrow)) return;
 
-              if (id(tomorrow_retry_count) >= 8) {
+              if (id(tomorrow_retry_count) >= 12) {
                 ESP_LOGW("eprices", "Auto tomorrow: max attempts reached (%d), stop retrying", id(tomorrow_retry_count));
                 return;
               }
@@ -480,6 +534,19 @@ time:
               id(tomorrow_retry_count)++;
               ESP_LOGW("eprices", "Auto tomorrow: attempt #%d at %02d:55", id(tomorrow_retry_count), t.hour);
               id(smart_tomorrow_price_update).execute();
+
+      # v1.4.0: last-chance tomorrow attempt at 23:15
+      - seconds: 15
+        minutes: 15
+        hours: 23
+        then:
+          - lambda: |-
+              if (id(tomorrow_last_update_success)) return;
+              if (id(is_updating_tomorrow)) return;
+              if (id(tomorrow_retry_count) >= 12) return;
+              id(tomorrow_retry_count)++;
+              ESP_LOGW("eprices", "Auto tomorrow: last-chance #%d at 23:15", id(tomorrow_retry_count));
+              id(need_tomorrow_update) = true;
 
       - minutes: /1
         seconds: 10
@@ -624,6 +691,12 @@ globals:
   - id: tomorrow_retry_count
     type: int
     initial_value: '0'
+  # v1.4.0: total HTTP fetch attempts for tomorrow. Separate from
+  # tomorrow_retry_count so that worker self-heal attempts and manual button
+  # presses do NOT consume the scheduled-trigger budget.
+  - id: tomorrow_fetch_count
+    type: int
+    initial_value: '0'
   - id: tomorrow_boot_recovery_executed
     type: bool
     initial_value: 'false'
@@ -744,11 +817,12 @@ sensor:
       int h = -1;
       int block = 0;
       int prev_hr = -1;
+      int prev_dst = -1;
       for (int k = 0; k < id(today_entry_count); ++k) {
         time_t kt = (time_t)id(price_timestamps_today)[k];
         struct tm ktm;
         localtime_r(&kt, &ktm);
-        if (ktm.tm_hour != prev_hr) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; }
+        if (ktm.tm_hour != prev_hr || ktm.tm_isdst != prev_dst) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; prev_dst = ktm.tm_isdst; }
         if (k == idx) { h = block; break; }
       }
       return (h >= 0 && h < (int)id(hourly_avg_prices_kwh).size()) ? id(hourly_avg_prices_kwh)[h] : NAN;
@@ -771,11 +845,12 @@ sensor:
       int h = -1;
       int block = 0;
       int prev_hr = -1;
+      int prev_dst = -1;
       for (int k = 0; k < id(today_entry_count); ++k) {
         time_t kt = (time_t)id(price_timestamps_today)[k];
         struct tm ktm;
         localtime_r(&kt, &ktm);
-        if (ktm.tm_hour != prev_hr) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; }
+        if (ktm.tm_hour != prev_hr || ktm.tm_isdst != prev_dst) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; prev_dst = ktm.tm_isdst; }
         if (k == idx) { h = block + 1; break; }
       }
       return (h >= 0 && h < (int)id(hourly_avg_prices_kwh).size()) ? id(hourly_avg_prices_kwh)[h] : NAN;
@@ -900,11 +975,12 @@ sensor:
       int h = -1;
       int block = 0;
       int prev_hr = -1;
+      int prev_dst = -1;
       for (int k = 0; k < id(tomorrow_entry_count); ++k) {
         time_t kt = (time_t)id(price_timestamps_tomorrow)[k];
         struct tm ktm;
         localtime_r(&kt, &ktm);
-        if (ktm.tm_hour != prev_hr) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; }
+        if (ktm.tm_hour != prev_hr || ktm.tm_isdst != prev_dst) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; prev_dst = ktm.tm_isdst; }
         if (k == idx) { h = block; break; }
       }
       return (h >= 0 && h < (int)id(tomorrow_hourly_avg_prices_kwh).size()) ? id(tomorrow_hourly_avg_prices_kwh)[h] : NAN;
@@ -935,11 +1011,12 @@ sensor:
       int h = -1;
       int block = 0;
       int prev_hr = -1;
+      int prev_dst = -1;
       for (int k = 0; k < id(tomorrow_entry_count); ++k) {
         time_t kt = (time_t)id(price_timestamps_tomorrow)[k];
         struct tm ktm;
         localtime_r(&kt, &ktm);
-        if (ktm.tm_hour != prev_hr) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; }
+        if (ktm.tm_hour != prev_hr || ktm.tm_isdst != prev_dst) { if (prev_hr >= 0) block++; prev_hr = ktm.tm_hour; prev_dst = ktm.tm_isdst; }
         if (k == idx) { h = block + 1; break; }
       }
       return (h >= 0 && h < (int)id(tomorrow_hourly_avg_prices_kwh).size()) ? id(tomorrow_hourly_avg_prices_kwh)[h] : NAN;
@@ -1316,7 +1393,7 @@ text_sensor:
     update_interval: never
     lambda: |-
       char buf[8];
-      snprintf(buf, sizeof(buf), "%d", id(tomorrow_retry_count));
+      snprintf(buf, sizeof(buf), "%d", id(tomorrow_fetch_count));
       return std::string(buf);
 
   - platform: template
@@ -1595,9 +1672,10 @@ script:
             char first_date[9];
             snprintf(first_date, sizeof(first_date), "%04d%02d%02d",
                      ftm->tm_year + 1900, ftm->tm_mon + 1, ftm->tm_mday);
-            // Allow one day tolerance: the API returns UTC-midnight-anchored data,
-            // so in CET (UTC+1) the first entry's local date may be yesterday.
-            // We accept the data regardless and just log a warning.
+            // v1.4.0 correction: the API anchors start/end to the LOCAL day of
+            // the bidding zone, so the first entry's local date always equals the
+            // requested date and this mismatch should not occur. The data is
+            // accepted regardless and a warning is logged if it ever does.
             if (strcmp(first_date, today_buf) != 0) {
               ESP_LOGW("eprices", "parse_today: first entry local date %s != today %s (UTC offset expected)",
                        first_date, today_buf);
@@ -1754,9 +1832,14 @@ script:
           ESP_LOGI("eprices", "recompute_today: starting, free heap = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
           // Map timestamps into legacy 96-slot grid.
-          // NOTE: on DST fall-back days (25h) the second occurrence of the
-          // repeated hour overwrites the first in this grid.
-          // Live price sensors use price_timestamps_today[] and are unaffected.
+          // NOTE: on a DST fall-back day the API returns 100 entries and both
+          // occurrences of local hour 02 map to slots 8..11, so the second
+          // overwrites the first here. This grid is a 24-hour wall-clock view by
+          // contract, so that is accepted and only affects the 15-min JSON
+          // sensors and the 15-min min/max time strings.
+          // Live price sensors are unaffected: the 15-min ones read
+          // price_timestamps_today[] directly, the hourly ones use the
+          // tm_isdst-aware block index below.
           id(hourly_prices).assign(96, NAN);
           for (int i = 0; i < n; i++) {
             time_t t = (time_t)id(price_timestamps_today)[i];
@@ -1782,14 +1865,19 @@ script:
           std::vector<int>   h_cnt(25, 0);
           std::vector<int>   h_label(25, -1);
           int prev_hour = -1;
+          int prev_dst  = -1;
           int hour_block = -1;
           for (int i = 0; i < n; i++) {
             time_t t = (time_t)id(price_timestamps_today)[i];
             struct tm tmi;
             localtime_r(&t, &tmi);
-            if (tmi.tm_hour != prev_hour) {
+            // v1.4.0: on a DST fall-back day local hour 02 occurs twice (tm_isdst
+            // 1, then 0). Comparing tm_hour alone merges both into one block;
+            // comparing tm_isdst as well keeps them separate -> 25 blocks, not 24.
+            if (tmi.tm_hour != prev_hour || tmi.tm_isdst != prev_dst) {
               hour_block++;
               prev_hour = tmi.tm_hour;
+              prev_dst  = tmi.tm_isdst;
             }
             if (hour_block >= 0 && hour_block < 25) {
               h_sums[hour_block] += id(price_values_today)[i];
@@ -1936,7 +2024,8 @@ script:
           // v1.2.2: Log heap at start
           ESP_LOGI("eprices", "recompute_tomorrow: starting, free heap = %u bytes", heap_caps_get_free_size(MALLOC_CAP_8BIT));
 
-          // NOTE: same DST fall-back caveat as recompute_today for legacy grid.
+          // NOTE: same DST fall-back caveat as recompute_today for this legacy
+          // grid - both occurrences of local hour 02 map to slots 8..11.
           id(tomorrow_hourly_prices).assign(96, NAN);
           for (int i = 0; i < n; i++) {
             time_t t = (time_t)id(price_timestamps_tomorrow)[i];
@@ -1962,14 +2051,19 @@ script:
           std::vector<int>   h_cnt(25, 0);
           std::vector<int>   h_label(25, -1);
           int prev_hour = -1;
+          int prev_dst  = -1;
           int hour_block = -1;
           for (int i = 0; i < n; i++) {
             time_t t = (time_t)id(price_timestamps_tomorrow)[i];
             struct tm tmi;
             localtime_r(&t, &tmi);
-            if (tmi.tm_hour != prev_hour) {
+            // v1.4.0: on a DST fall-back day local hour 02 occurs twice (tm_isdst
+            // 1, then 0). Comparing tm_hour alone merges both into one block;
+            // comparing tm_isdst as well keeps them separate -> 25 blocks, not 24.
+            if (tmi.tm_hour != prev_hour || tmi.tm_isdst != prev_dst) {
               hour_block++;
               prev_hour = tmi.tm_hour;
+              prev_dst  = tmi.tm_isdst;
             }
             if (hour_block >= 0 && hour_block < 25) {
               h_sums[hour_block] += id(price_values_tomorrow)[i];
@@ -2083,7 +2177,14 @@ script:
           // Set Tomorrow Current Price Status consistently (like recompute_today)
           // "Current" for tomorrow = tomorrow at the same local time (now + 86400s)
           // -------------------------------------------------------------------
-          int64_t ts_now_tomorrow = (int64_t)id(ha_time).now().timestamp + 86400;
+          // v1.3.0 follow-up: calendar-day increment instead of +86400 UTC,
+          // matching the four Tomorrow sensor lambdas (DST transition nights).
+          time_t anchor_t = (time_t)id(ha_time).now().timestamp;
+          struct tm anchor_tm;
+          localtime_r(&anchor_t, &anchor_tm);
+          anchor_tm.tm_mday += 1;
+          anchor_tm.tm_isdst = -1;
+          int64_t ts_now_tomorrow = (int64_t)mktime(&anchor_tm);
           int cur = -1;
           for (int j = n - 1; j >= 0; --j)
             if (id(price_timestamps_tomorrow)[j] <= ts_now_tomorrow) { cur = j; break; }
@@ -2131,6 +2232,7 @@ script:
             id(today_last_api_fetch_time) = std::string("Never");
             id(today_last_api_fetch_time_sensor).publish_state("Never");
             id(tomorrow_retry_count) = 0;
+            id(tomorrow_fetch_count) = 0;
             id(tomorrow_price_update_attempts).publish_state("0");
 
             // Only schedule tomorrow HTTP update if time is valid AND we're in the allowed window
@@ -2250,9 +2352,11 @@ script:
               ESP_LOGW("eprices", "Auto today: failure, auto_today_retry_count=%d", id(auto_today_retry_count));
 
               if (id(auto_today_retry_count) >= 8) {
-                id(auto_today_retry_active) = false;
-                id(update_status_message) = "Auto today: failed after 8 attempts";
-                ESP_LOGW("eprices", "Auto today: giving up after 8 attempts");
+                // v1.4.0: enter slow-recovery mode instead of deactivating.
+                // Reset counter so hourly :30 triggers keep firing.
+                id(auto_today_retry_count) = 0;
+                id(update_status_message) = "Auto today: slow recovery (hourly :30)";
+                ESP_LOGW("eprices", "Auto today: burst exhausted, entering slow recovery");
               } else {
                 // Re-arm worker for another quick try (plus scheduled retries later)
                 id(need_today_update) = true;
@@ -2283,8 +2387,8 @@ script:
           id(is_updating_tomorrow) = true;
           id(is_updating_tomorrow_since) = (time_t)id(ha_time).now().timestamp;
           id(tomorrow_last_update_attempt) = id(ha_time).now().timestamp;
-          id(tomorrow_retry_count)++;
-          { char buf[8]; snprintf(buf, sizeof(buf), "%d", id(tomorrow_retry_count)); id(tomorrow_price_update_attempts).publish_state(buf); }
+          id(tomorrow_fetch_count)++;
+          { char buf[8]; snprintf(buf, sizeof(buf), "%d", id(tomorrow_fetch_count)); id(tomorrow_price_update_attempts).publish_state(buf); }
           // Pre-compute URL into global
           // v1.2.4: Add explicit end= date parameter to match today fix —
           // ensures the API returns only tomorrow's day and not a multi-day window.
@@ -2417,7 +2521,12 @@ script:
             return;
           }
           id(tomorrow_boot_recovery_executed) = true;
-          id(tomorrow_price_update_attempts).publish_state("0");
+          // v1.4.0: publish the CURRENT count instead of forcing it to 0.
+          // tomorrow_fetch_count is a global already initialised to 0, so no
+          // reset is needed here. Forcing 0 would erase a fetch that a
+          // scheduled trigger completed between boot and this recovery
+          // (on_boot recovery runs at +50 s; triggers can fire from +0 s).
+          { char buf[8]; snprintf(buf, sizeof(buf), "%d", id(tomorrow_fetch_count)); id(tomorrow_price_update_attempts).publish_state(buf); }
 
           auto t = id(ha_time).now();
           if (!t.is_valid()) {
@@ -2500,6 +2609,10 @@ script:
           id(price_timestamps_tomorrow).clear();
           id(tomorrow_entry_count) = 0;
           id(tomorrow_date_str) = "00000000";
+          // v1.4.0: the worker self-heal uses tomorrow_last_update_attempt as
+          // its throttle reference. Zero it here, otherwise a manual clear is
+          // silently undone within 30 minutes by the next self-heal tick.
+          id(tomorrow_last_update_attempt) = 0;
           id(tomorrow_hourly_prices).assign(96, NAN);
           id(tomorrow_hourly_avg_prices_kwh).assign(25, NAN);
           id(tomorrow_current_price).publish_state(NAN);
