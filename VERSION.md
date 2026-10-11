@@ -1,5 +1,101 @@
 # EPrices – Version History
 
+## v1.4.1 — 2026-10-11
+
+Build-optimization release. Two ESP-IDF advanced framework options were enabled
+and the 16 pre-existing compiler warnings coming from the price lambdas were
+eliminated in the source — verified warning-free in the final v1.4.1 build log.
+No new sensors, no entity ID changes, no secrets changes, no logic changes and no
+change to any published value. Drop-in replacement for v1.4.0.
+
+**`eprices_nvs.h` requires no update when migrating from v1.4.0 to v1.4.1** —
+the helper file is unchanged, the NVS namespace, keys and array layout are
+untouched, and all stored price data carries over through the OTA.
+
+### Binary-size reduction: `minimum_chip_revision: "3.1"`
+
+The device reports `ESP32 Chip: ESP32 rev3.1`, so the build now declares a
+minimum chip revision of v3.1. ESP-IDF then omits the errata-workaround code
+paths needed only for revisions below v3.0, which shrinks the firmware image.
+
+### IRAM reclaim: `sram1_as_iram: true`
+
+The 40 KB SRAM1 region is mapped as instruction RAM instead of data RAM, giving
+40 KB more IRAM for hot code. ESPHome confirmed the board's bootloader supports
+this (`Bootloader supports SRAM1 as IRAM (+40KB)`), which also proves the
+bootloader is ESP-IDF v5.1 or newer.
+
+### Measured build results (v1.4.0 → v1.4.1)
+
+| Region | v1.4.0 | v1.4.1 | Change |
+|---|---|---|---|
+| Flash (total image) | 1,028,291 B (56.0 %) | 1,026,067 B (55.9 %) | −2,224 B |
+| IRAM region | 131,072 B | 172,032 B | **+40,960 B (+40 KiB)** |
+| IRAM used / free | 77,247 / 53,825 B (58.93 %) | 76,771 / 95,261 B (44.63 %) | −476 / +41,436 B |
+| DRAM region | 180,736 B | 180,736 B | unchanged |
+| DRAM used | 55,000 B (30.43 %) | 54,984 B (30.42 %) | −16 B |
+
+Confirmed in the generated `sdkconfig` (`CONFIG_ESP32_REV_MIN_3_1=y`,
+`CONFIG_ESP_REV_MIN_FULL=301`, `CONFIG_ESP_SYSTEM_ESP32_SRAM1_REGION_AS_IRAM=y`)
+and in the linker map (`iram0_0_seg len = 0x20000 + 0xA000`).
+
+No heap was given up for it. `_sram1_iram_len` resolved to `0` (IRAM code ends at
+`0x40092BE4`, below the `0x400A0000` SRAM1 boundary), so `_heap_end` stayed at
+`0x40000000` and ESP-IDF reserved nothing from the heap — SRAM1 had previously
+been reserved for the **bootloader**, not for the app heap. Runtime free heap
+(`MALLOC_CAP_8BIT`) confirms it: **180,476 → 180,492 B** (pre-cleanup build) and
+**180,504 B** (final build) at the start of `recompute_today`. OTA payload
+1,026,067 B in a 1,792 KiB app partition (44 % free).
+
+### Compiler-warning cleanup (`snprintf` + buffer sizing)
+
+The v1.4.0 build produced 16 `-Wformat-truncation` / `-Wformat-overflow` warnings
+(10 truncation, 6 overflow) from the `snprintf`/`sprintf` calls in the price
+lambdas. All 12 `sprintf` calls were converted to bounded `snprintf`, and 22
+`char[]` buffers were widened to GCC's worst-case output width: counter buffers
+`8 → 12`, `YYYYMMDD` date buffers `9 → 34`, timestamp buffers `20 → 32`,
+`strftime` buffers `20 → 24`, `HH:MM` buffers `tb 6 → 24` and `hb 6 → 16`.
+`char m[40]` / `char m[50]` were already large enough and only had their call
+converted. The sizes are worst-case sizes, not typical ones — GCC assumes an
+unbounded `int` can print 11 characters — and must not be shrunk back. Compile-
+time only: no behaviour, entity or NVS changes.
+
+**Verified:** the final v1.4.1 build compiled with **zero compiler warnings**.
+
+### New hardware constraints
+
+- The image will not boot on — and cannot be OTA'd to — an ESP32 module older
+  than revision v3.1: both the ESP-IDF bootloader and the OTA updater reject a
+  chip below the image's declared minimum revision.
+- `sram1_as_iram` needs an ESP-IDF v5.1+ bootloader, and OTA does not update the
+  bootloader, so an older board would need a USB reflash.
+- `minimum_chip_revision` is valid only for the original ESP32. Switching
+  `board:` to ESP32-S3/C3/S2/C6 requires removing the whole `advanced:` block.
+
+`compiler_optimization` was already `SIZE` (ESPHome default) and all existing
+`sdkconfig_options` are unchanged.
+
+### Changed location in `eprices.yaml`
+
+- `esp32:` → `framework:` — new `advanced:` block with `minimum_chip_revision:
+  "3.1"` and `sram1_as_iram: true`, plus inline safety notes, added above the
+  existing `sdkconfig_options:`
+- File header — new `v1.4.1 compiler-warning cleanup` note explaining the
+  buffer-sizing rule
+- 26 lambda statements — 22 `char[]` declarations widened, 12 `sprintf` calls
+  converted to `snprintf`; no lambda logic changed
+
+### Migration checklist (v1.4.0 → v1.4.1)
+
+| Item | Action required |
+|---|---|
+| `eprices_nvs.h` | **None** — unchanged, no update needed |
+| `secrets.yaml` | None |
+| HA entities / automations | None |
+| NVS-stored prices | Preserved |
+| Flash method | Normal ESPHome OTA |
+| Hardware | ESP32 rev ≥ v3.1 and ESP-IDF v5.1+ bootloader required |
+
 ## v1.4.0 — 2026-10-06
 
 Reliability release expanding the API retry coverage window for both today
