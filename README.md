@@ -44,14 +44,44 @@ Assistant automations are required for any core functionality.
 
 ## Hardware
 
-- **ESP32** development board (tested on `esp32dev`)
+- **ESP32** development board (tested on `esp32dev` - Wemos D1 Mini ESP32)
 - ESPHome with **`esp-idf` framework** (required for NVS flash support)
+- **ESP32 chip revision v3.1 or newer** (required since v1.4.1) — the firmware
+  declares `minimum_chip_revision: "3.1"`, and both the ESP-IDF bootloader and
+  the OTA updater refuse a chip older than the image's minimum revision. Check
+  the `ESP32 Chip: ESP32 revX.Y` line in the boot log.
 
 > **Note on ESP32 variants:** EPrices is compiled and tested on the original
 > dual-core ESP32 (`esp32dev`). It also runs on ESP32-S3 with a one-line board
 > change. Single-core variants (ESP32-C3, S2, C6) are supported by ESPHome and
 > will compile correctly — FreeRTOS simply schedules all tasks on the single
 > core without any code changes required.
+>
+> **v1.4.1 build options:** `esp32:` → `framework:` → `advanced:` sets
+> `minimum_chip_revision: "3.1"` and `sram1_as_iram: true`. These apply to the
+> original ESP32 only — when switching `board:` to ESP32-S3, C3, S2 or C6, delete
+> the whole `advanced:` block, because ESPHome rejects `minimum_chip_revision` on
+> non-ESP32 variants. `sram1_as_iram` additionally needs an ESP-IDF v5.1+
+> bootloader, and OTA updates do not replace the bootloader.
+>
+> **Measured result (v1.4.0 → v1.4.1):** Flash 1,028,291 → 1,026,067 B (−2,224 B);
+> IRAM region 131,072 → 172,032 B (+40 KiB), usage 58.93 % → 44.63 %, free
+> 53,825 → 95,261 B; DRAM region unchanged at 180,736 B and **no heap was lost**
+> (runtime free heap 180,476 → 180,504 B) — SRAM1 was previously reserved for the
+> bootloader, not for the app heap. Verified on-device: `ESP32 Chip: ESP32 rev3.1`,
+> both optimization warnings gone, NVS `96 entries for 20261011` and
+> `96 entries for 20261012`, `safe_mode` reports a successful boot.
+>
+> **Warning cleanup (v1.4.1):** the 16 `-Wformat-truncation` /
+> `-Wformat-overflow` warnings that the v1.4.0 build emitted have been eliminated,
+> and the final v1.4.1 build log confirms a **warning-free compile** — the only
+> warning left is ESPHome's own `Bundle contains secrets` notice about the
+> remote-build bundle. All 12 `sprintf` calls in lambdas became bounded
+> `snprintf`, and 22 `char[]` buffers were widened to GCC's worst-case output
+> width (counters 8 → 12, `YYYYMMDD` dates 9 → 34, timestamps 20 → 32 and
+> 20 → 24, `HH:MM` 6 → 24 / 6 → 16). Compile-time only — no published value,
+> entity or NVS changes. Do not shrink these buffers back: the warnings return
+> with them.
 
 ---
 
@@ -61,10 +91,16 @@ Assistant automations are required for any core functionality.
 |---|---|
 | `eprices.yaml` | Main ESPHome configuration |
 | `eprices_nvs.h` | NVS helper — save/load price arrays to ESP32 flash |
-| `secrets.yaml` | Your local secrets (not committed to git) |
+| `secrets.yaml` | Placeholder template only (placeholders, no real values) — copy it, fill in your own values, and never commit your real secrets |
 | `CHANGELOG.md` | Complete sensor and entity ID reference |
 | `VERSION.md` | Version history and release notes |
 | `ENTSO-E-PRICES-MIGRATION.md` | Optional — migration guide from the predecessor project |
+| `eprices-install-log.txt` | v1.4.1 build + OTA log — warning-free compile and the final size report |
+| `eprices-install-log-v1.4.0.txt` | v1.4.0 build + OTA log — the "before" size report (16 format warnings) |
+| `eprices-device-log.txt` | v1.4.1 post-OTA boot log — verification evidence |
+| `eprices-device-log-v1.4.1-precleanup.txt` | v1.4.1 boot log of the intermediate build (framework options only, before the warning cleanup) |
+| `eprices-device-log-v1.4.0.txt` | v1.4.0 pre-optimization boot log — the "before" baseline (still shows the two ESPHome optimization warnings) |
+
 
 ---
 
