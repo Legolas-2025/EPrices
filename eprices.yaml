@@ -1,8 +1,66 @@
 # =============================================================================
-# ESPHome: EPrices v1.4.0
+# ESPHome: EPrices v1.4.1
 #
 # Electricity price data provided by Energy-Charts (https://energy-charts.info)
 # under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).
+#
+# v1.4.1 ESP32 framework optimization (2026-10-11):
+# - esp32 > framework > advanced was added with two ESP-IDF options:
+#     minimum_chip_revision: "3.1" - ESP-IDF drops the errata-workaround code
+#       paths for chip revisions below v3.0, which reduces the binary size.
+#     sram1_as_iram: true          - the 40KB SRAM1 region is mapped as
+#       instruction RAM instead of data RAM, freeing IRAM for hot code.
+# - Both are safe on this board: the boot log reports "ESP32 Chip: ESP32
+#   rev3.1, 2 core(s)" and "Bootloader supports SRAM1 as IRAM (+40KB)", and
+#   those two ESPHome warnings were exactly what suggested these options.
+# - MEASURED RESULT (v1.4.0 -> v1.4.1, ESPHome 2026.9.1 / ESP-IDF 5.5.5):
+#     Flash  1,028,291 -> 1,026,067 B  (-2,224 B, -0.22%)
+#            (the intermediate build, framework options only and before the
+#            warning cleanup below, measured 1,025,951 B - the widened buffers
+#            add +116 B of .text)
+#     IRAM   region 131,072 -> 172,032 B (+40 KiB); used 58.93% -> 44.63%;
+#            free 53,825 -> 95,261 B
+#     DRAM   region unchanged at 180,736 B; used 55,000 -> 54,984 B. No heap was
+#            given up: _sram1_iram_len resolved to 0 (IRAM code ends at 0x40092BE4,
+#            below the 0x400A0000 SRAM1 boundary), so _heap_end stayed 0x40000000
+#            and nothing was reserved. SRAM1 had been reserved for the BOOTLOADER,
+#            not for the app heap. Runtime free heap 180,476 -> 180,504 B.
+#     Verified on-device after OTA: rev3.1 confirmed, both ESPHome optimization
+#     warnings gone, NVS "96 entries for 20261011" and "96 entries for 20261012",
+#     safe_mode boot-loop counter reset, no watchdog/crash/time-jump messages.
+#     Confirmed in sdkconfig: CONFIG_ESP32_REV_MIN_3_1=y and
+#     CONFIG_ESP_SYSTEM_ESP32_SRAM1_REGION_AS_IRAM=y.
+
+# - CONSTRAINT: this image declares a minimum chip revision of v3.1, so the
+#   ESP-IDF bootloader refuses to boot - and the OTA updater refuses to accept -
+#   an ESP32 module older than rev v3.1. Never raise this value above the
+#   revision shown in the boot log.
+# - CONSTRAINT: sram1_as_iram needs an ESP-IDF v5.1+ bootloader. OTA does not
+#   update the bootloader, so a pre-v5.1 board would fail to boot and would
+#   need a USB reflash. Not an issue on the tested board.
+# - No functional changes: no scripts, triggers, sensors, globals, secrets or
+#   entity ID changes. Drop-in replacement for v1.4.0.
+#   eprices_nvs.h is UNCHANGED - no update required when migrating
+#   v1.4.0 -> v1.4.1; the NVS namespace, keys and array layout are untouched,
+#   so stored price data survives the OTA.
+#
+# v1.4.1 compiler-warning cleanup (2026-10-11):
+# - Every sprintf() inside a lambda was replaced by snprintf() with a sizeof()
+#   bound, and the fixed char[] buffers handed to snprintf() were widened to
+#   GCC's worst-case output width so -Wformat-truncation / -Wformat-overflow no
+#   longer fire. GCC assumes an unbounded 32-bit int can print up to 11
+#   characters, so "%04d%02d%02d" needs 3*11+1 = 34 bytes and
+#   "%04d-%02d-%02d %02d:%02d:%02d" needs 32. These sizes are deliberate -
+#   do not shrink them back, the warnings will come back with them.
+# - The values these buffers actually carry (YYYYMMDD dates, HH:MM times, small
+#   counters) never approached the old limits, so no published state changes:
+#   this is a compile-time-only cleanup that removes all 16 build warnings.
+# - VERIFIED: the final v1.4.1 build (config_hash 0x02384f07, compiled
+#   2026-10-11 13:43:35 +0200) compiled with ZERO compiler warnings. The only
+#   warning left in eprices-install-log.txt is ESPHome's own "WARNING Bundle
+#   contains secrets" notice about the remote-build bundle, not the code.
+#   Published values are unchanged (Today Lowest 0.0205 / Highest 0.3342 /
+#   Average 0.2346 EUR/kWh, identical to the pre-cleanup build).
 #
 # v1.4.0 retry-window expansion (2026-10-06):
 # - Today auto-retry no longer deactivates after 8 burst attempts. The
@@ -219,6 +277,27 @@ esp32:
   board: esp32dev
   framework:
     type: esp-idf
+    # v1.4.1 ESP32 advanced options (2026-10-11):
+    # The boot log reports "ESP32 Chip: ESP32 rev3.1, 2 core(s)" and
+    # "Bootloader supports SRAM1 as IRAM (+40KB)", so both options below are
+    # safe for this board and were the two optimizations ESPHome suggested:
+    #   minimum_chip_revision: "3.1" -> ESP-IDF drops the errata-workaround code
+    #     for chip revisions < 3.0, reducing binary size (and, when PSRAM is
+    #     used, keeps libc in ROM instead of IRAM).
+    #   sram1_as_iram: true -> reclaims the 40KB SRAM1 region as IRAM.
+    # SAFETY NOTES (do not change these blindly):
+    #   - minimum_chip_revision must never be HIGHER than the actual chip
+    #     revision: ESP-IDF's bootloader and the OTA updater both compare the
+    #     image's minimum revision against the chip and refuse to boot / refuse
+    #     the OTA when the chip is older. Verify "ESP32 Chip: ESP32 revX.Y" in
+    #     the boot log before raising this value.
+    #   - sram1_as_iram requires a bootloader from ESP-IDF v5.1 or later; with
+    #     an older bootloader the app fails to boot and OTA does NOT update the
+    #     bootloader (USB reflash needed). ESPHome confirmed this bootloader is
+    #     new enough, so it is safe here.
+    advanced:
+      minimum_chip_revision: "3.1"
+      sram1_as_iram: true
     sdkconfig_options:
       CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
       # v1.2.2: Increase watchdog timeout to prevent false positives during
@@ -1173,7 +1252,7 @@ text_sensor:
       time_t lu = id(last_successful_update);
       if (lu > 0) {
         struct tm *tmi = localtime(&lu);
-        char buf[20];
+        char buf[24];
         strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tmi);
         return std::string(buf);
       }
@@ -1199,7 +1278,7 @@ text_sensor:
     entity_category: "diagnostic"
     update_interval: 60s
     lambda: |-
-      char buf[8];
+      char buf[12];
       snprintf(buf, sizeof(buf), "%d", id(today_entry_count));
       return std::string(buf);
 
@@ -1270,7 +1349,7 @@ text_sensor:
       time_t lu = id(tomorrow_last_update_attempt);
       if (lu > 0) {
         struct tm *tmi = localtime(&lu);
-        char buf[20];
+        char buf[24];
         strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tmi);
         return std::string(buf);
       }
@@ -1296,7 +1375,7 @@ text_sensor:
     entity_category: "diagnostic"
     update_interval: 60s
     lambda: |-
-      char buf[8];
+      char buf[12];
       snprintf(buf, sizeof(buf), "%d", id(tomorrow_entry_count));
       return std::string(buf);
 
@@ -1312,7 +1391,7 @@ text_sensor:
       time_t bt = id(boot_time);
       if (bt > 0) {
         struct tm *tmi = localtime(&bt);
-        char buf[20];
+        char buf[24];
         strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tmi);
         return std::string(buf);
       }
@@ -1381,7 +1460,7 @@ text_sensor:
     entity_category: "diagnostic"
     update_interval: never
     lambda: |-
-      char buf[8];
+      char buf[12];
       snprintf(buf, sizeof(buf), "%d", id(retry_count));
       return std::string(buf);
 
@@ -1392,7 +1471,7 @@ text_sensor:
     entity_category: "diagnostic"
     update_interval: never
     lambda: |-
-      char buf[8];
+      char buf[12];
       snprintf(buf, sizeof(buf), "%d", id(tomorrow_fetch_count));
       return std::string(buf);
 
@@ -1485,7 +1564,7 @@ script:
     then:
       - lambda: |-
           auto now = id(ha_time).now();
-          char today_buf[9];
+          char today_buf[34];
           snprintf(today_buf, sizeof(today_buf), "%04d%02d%02d",
                    now.year, now.month, now.day_of_month);
           std::string expected(today_buf);
@@ -1544,7 +1623,7 @@ script:
           tmr_tm.tm_hour = 12; // midday anchor — away from any DST boundary hour
           tmr_tm.tm_isdst = -1;
           mktime(&tmr_tm); // normalises month/year rollover and re-applies DST rules
-          char tmr_buf[9];
+          char tmr_buf[34];
           snprintf(tmr_buf, sizeof(tmr_buf), "%04d%02d%02d",
                    tmr_tm.tm_year + 1900, tmr_tm.tm_mon + 1, tmr_tm.tm_mday);
           std::string expected(tmr_buf);
@@ -1660,7 +1739,7 @@ script:
           // Accept ALL entries from the response without per-entry filtering
           // (the API returns exactly one day of data per request).
           auto now = id(ha_time).now();
-          char today_buf[9];
+          char today_buf[34];
           snprintf(today_buf, sizeof(today_buf), "%04d%02d%02d",
                    now.year, now.month, now.day_of_month);
 
@@ -1669,7 +1748,7 @@ script:
           time_t ft = (time_t)first_ts;
           struct tm *ftm = localtime(&ft);
           if (ftm) {
-            char first_date[9];
+            char first_date[34];
             snprintf(first_date, sizeof(first_date), "%04d%02d%02d",
                      ftm->tm_year + 1900, ftm->tm_mon + 1, ftm->tm_mday);
             // v1.4.0 correction: the API anchors start/end to the LOCAL day of
@@ -1788,7 +1867,7 @@ script:
           tmr_tm.tm_hour = 12; // midday anchor — away from any DST boundary hour
           tmr_tm.tm_isdst = -1;
           mktime(&tmr_tm); // normalises month/year rollover and re-applies DST rules
-          char tmr_buf[9];
+          char tmr_buf[34];
           snprintf(tmr_buf, sizeof(tmr_buf), "%04d%02d%02d",
                    tmr_tm.tm_year + 1900, tmr_tm.tm_mon + 1, tmr_tm.tm_mday);
 
@@ -1977,16 +2056,16 @@ script:
           if (min_v < 9999.0f) {
             id(min_price).publish_state(min_v);
             id(max_price).publish_state(max_v);
-            char tb[6];
-            sprintf(tb,"%02d:%02d",min_idx/4,(min_idx%4)*15); id(min_price_time_str)=tb;
-            sprintf(tb,"%02d:%02d",max_idx/4,(max_idx%4)*15); id(max_price_time_str)=tb;
+            char tb[24];
+            snprintf(tb, sizeof(tb), "%02d:%02d", min_idx/4, (min_idx%4)*15); id(min_price_time_str)=tb;
+            snprintf(tb, sizeof(tb), "%02d:%02d", max_idx/4, (max_idx%4)*15); id(max_price_time_str)=tb;
           }
           if (h_min_v < 9999.0f) {
             id(min_hourly_price).publish_state(h_min_v);
             id(max_hourly_price).publish_state(h_max_v);
-            char hb[6];
-            sprintf(hb,"%02d:00",(h_label[h_min_i] >= 0 ? h_label[h_min_i] : h_min_i)); id(min_hourly_price_time_str)=hb;
-            sprintf(hb,"%02d:00",(h_label[h_max_i] >= 0 ? h_label[h_max_i] : h_max_i)); id(max_hourly_price_time_str)=hb;
+            char hb[16];
+            snprintf(hb, sizeof(hb), "%02d:00", (h_label[h_min_i] >= 0 ? h_label[h_min_i] : h_min_i)); id(min_hourly_price_time_str)=hb;
+            snprintf(hb, sizeof(hb), "%02d:00", (h_label[h_max_i] >= 0 ? h_label[h_max_i] : h_max_i)); id(max_hourly_price_time_str)=hb;
           }
           if (cnt_kwh > 0) id(avg_price).publish_state((float)(raw_sum / cnt_kwh));
 
@@ -1999,7 +2078,7 @@ script:
             if (id(price_timestamps_today)[j] <= ts_now) { cur = j; break; }
           // Staleness check: if stored date doesn't match today, flag as stale
           auto now_check = id(ha_time).now();
-          char today_check[9];
+          char today_check[34];
           snprintf(today_check, sizeof(today_check), "%04d%02d%02d",
                    now_check.year, now_check.month, now_check.day_of_month);
           if (id(today_date_str) != std::string(today_check)) {
@@ -2158,16 +2237,16 @@ script:
           if (min_v < 9999.0f) {
             id(tomorrow_min_price).publish_state(min_v);
             id(tomorrow_max_price).publish_state(max_v);
-            char tb[6];
-            sprintf(tb,"%02d:%02d",min_idx/4,(min_idx%4)*15); id(tomorrow_min_price_time_str)=tb;
-            sprintf(tb,"%02d:%02d",max_idx/4,(max_idx%4)*15); id(tomorrow_max_price_time_str)=tb;
+            char tb[24];
+            snprintf(tb, sizeof(tb), "%02d:%02d", min_idx/4, (min_idx%4)*15); id(tomorrow_min_price_time_str)=tb;
+            snprintf(tb, sizeof(tb), "%02d:%02d", max_idx/4, (max_idx%4)*15); id(tomorrow_max_price_time_str)=tb;
           }
           if (h_min_v < 9999.0f) {
             id(tomorrow_min_hourly_price).publish_state(h_min_v);
             id(tomorrow_max_hourly_price).publish_state(h_max_v);
-            char hb[6];
-            sprintf(hb,"%02d:00",(h_label[h_min_i] >= 0 ? h_label[h_min_i] : h_min_i)); id(tomorrow_min_hourly_price_time_str)=hb;
-            sprintf(hb,"%02d:00",(h_label[h_max_i] >= 0 ? h_label[h_max_i] : h_max_i)); id(tomorrow_max_hourly_price_time_str)=hb;
+            char hb[16];
+            snprintf(hb, sizeof(hb), "%02d:00", (h_label[h_min_i] >= 0 ? h_label[h_min_i] : h_min_i)); id(tomorrow_min_hourly_price_time_str)=hb;
+            snprintf(hb, sizeof(hb), "%02d:00", (h_label[h_max_i] >= 0 ? h_label[h_max_i] : h_max_i)); id(tomorrow_max_hourly_price_time_str)=hb;
           }
           if (cnt_kwh > 0) id(tomorrow_avg_price).publish_state((float)(raw_sum / cnt_kwh));
 
@@ -2276,7 +2355,7 @@ script:
           id(is_updating_today_since) = (time_t)id(ha_time).now().timestamp;
           id(last_update_attempt) = id(ha_time).now().timestamp;
           id(retry_count)++;
-          { char buf[8]; snprintf(buf, sizeof(buf), "%d", id(retry_count)); id(today_price_update_attempts).publish_state(buf); }
+          { char buf[12]; snprintf(buf, sizeof(buf), "%d", id(retry_count)); id(today_price_update_attempts).publish_state(buf); }
           // Pre-compute URL into global
           // v1.2.4: Add explicit start=&end= date parameters — the bare /price
           // endpoint without dates now returns stale cached data (~2 months old).
@@ -2298,7 +2377,7 @@ script:
             then:
               - lambda: |-
                   if (response->status_code != 200) {
-                    char m[40]; sprintf(m, "HTTP error %d", response->status_code);
+                    char m[40]; snprintf(m, sizeof(m), "HTTP error %d", response->status_code);
                     id(update_status_message) = std::string(m);
                     id(last_update_success) = false;
                     id(is_updating_today) = false;
@@ -2322,14 +2401,14 @@ script:
           if (id(today_entry_count) > 0) {
             id(recompute_today).execute();
             id(nvs_save_today_script).execute();
-            char m[50]; sprintf(m, "Success (%d pts)", id(today_entry_count));
+            char m[50]; snprintf(m, sizeof(m), "Success (%d pts)", id(today_entry_count));
             id(update_status_message) = std::string(m);
             id(last_update_success) = true;
             id(last_update_source).publish_state("HTTP_today");
 
             // Stamp API fetch time
             auto nt = id(ha_time).now();
-            char tbuf[20];
+            char tbuf[32];
             snprintf(tbuf, sizeof(tbuf), "%04d-%02d-%02d %02d:%02d:%02d",
                      nt.year, nt.month, nt.day_of_month,
                      nt.hour, nt.minute, nt.second);
@@ -2388,7 +2467,7 @@ script:
           id(is_updating_tomorrow_since) = (time_t)id(ha_time).now().timestamp;
           id(tomorrow_last_update_attempt) = id(ha_time).now().timestamp;
           id(tomorrow_fetch_count)++;
-          { char buf[8]; snprintf(buf, sizeof(buf), "%d", id(tomorrow_fetch_count)); id(tomorrow_price_update_attempts).publish_state(buf); }
+          { char buf[12]; snprintf(buf, sizeof(buf), "%d", id(tomorrow_fetch_count)); id(tomorrow_price_update_attempts).publish_state(buf); }
           // Pre-compute URL into global
           // v1.2.4: Add explicit end= date parameter to match today fix —
           // ensures the API returns only tomorrow's day and not a multi-day window.
@@ -2418,7 +2497,7 @@ script:
             then:
               - lambda: |-
                   if (response->status_code != 200) {
-                    char m[40]; sprintf(m, "HTTP error %d", response->status_code);
+                    char m[40]; snprintf(m, sizeof(m), "HTTP error %d", response->status_code);
                     id(tomorrow_update_status_message) = std::string(m);
                     id(tomorrow_last_update_success) = false;
                     id(is_updating_tomorrow) = false;
@@ -2442,14 +2521,14 @@ script:
           if (id(tomorrow_entry_count) > 0) {
             id(recompute_tomorrow).execute();
             id(nvs_save_tomorrow_script).execute();
-            char m[50]; sprintf(m, "Success (%d pts)", id(tomorrow_entry_count));
+            char m[50]; snprintf(m, sizeof(m), "Success (%d pts)", id(tomorrow_entry_count));
             id(tomorrow_update_status_message) = std::string(m);
             id(tomorrow_last_update_success) = true;
             id(tomorrow_last_successful_update) = id(ha_time).now().timestamp;
 
             // Stamp API fetch time
             auto nt = id(ha_time).now();
-            char tbuf[20];
+            char tbuf[32];
             snprintf(tbuf, sizeof(tbuf), "%04d-%02d-%02d %02d:%02d:%02d",
                      nt.year, nt.month, nt.day_of_month,
                      nt.hour, nt.minute, nt.second);
@@ -2526,7 +2605,7 @@ script:
           // reset is needed here. Forcing 0 would erase a fetch that a
           // scheduled trigger completed between boot and this recovery
           // (on_boot recovery runs at +50 s; triggers can fire from +0 s).
-          { char buf[8]; snprintf(buf, sizeof(buf), "%d", id(tomorrow_fetch_count)); id(tomorrow_price_update_attempts).publish_state(buf); }
+          { char buf[12]; snprintf(buf, sizeof(buf), "%d", id(tomorrow_fetch_count)); id(tomorrow_price_update_attempts).publish_state(buf); }
 
           auto t = id(ha_time).now();
           if (!t.is_valid()) {
