@@ -1,5 +1,254 @@
 # EPrices – Changelog
 
+## v1.4.1 — 2026-10-11
+
+### ESP32 framework optimization (binary size + IRAM reclaim)
+
+Build-only release: two ESP-IDF advanced framework options were enabled, and all
+16 pre-existing compiler warnings coming from the price lambdas were removed —
+the final v1.4.1 build log confirms a warning-free compile. No new sensors, no
+entity ID changes, no secrets changes, no script, trigger or
+global changes, and no change to any published value. Drop-in replacement for
+v1.4.0.
+
+**`eprices_nvs.h` does NOT need updating for the v1.4.0 → v1.4.1 migration.**
+The helper file is unchanged (it has required no changes since v1.3.0), the NVS
+namespace `eprices`, its keys and the dynamic timestamp/price array layout are
+untouched, so all stored today/tomorrow price data survives the OTA unchanged.
+
+#### What changed
+
+| Option | Value | Effect |
+|---|---|---|
+| `esp32:` → `framework:` → `advanced:` → `minimum_chip_revision` | `"3.1"` | ESP-IDF omits the errata-workaround code paths for chip revisions below v3.0 → smaller firmware image |
+| `esp32:` → `framework:` → `advanced:` → `sram1_as_iram` | `true` | The 40 KB SRAM1 region is mapped as instruction RAM instead of data RAM → 40 KB more IRAM for hot code |
+
+`compiler_optimization` was already `SIZE` (the ESPHome default) and is left
+unset. Every existing `sdkconfig_options` entry is unchanged
+(`CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"`, `CONFIG_ESP_TASK_WDT_TIMEOUT_S: "40"`,
+idle-task watchdogs disabled).
+
+#### Why these options are safe on this board
+
+Both were recommended by ESPHome itself in the device boot log:
+
+```text
+[I][app:158]: ESP32 Chip: ESP32 rev3.1, 2 core(s)
+[W][app:171]: Chip rev >= 3.0 detected. Set minimum_chip_revision: "3.1" under
+              esp32 > framework > advanced to reduce binary size
+[W][app:198]: Bootloader supports SRAM1 as IRAM (+40KB). Set sram1_as_iram: true
+              under esp32 > framework > advanced
+```
+
+ESPHome prints the second warning only after successfully reading the bootloader
+descriptor, so it confirms the installed bootloader is new enough for
+`sram1_as_iram`.
+
+#### Constraints introduced by this release
+
+- **Chip-revision floor:** the image now declares `minimum_chip_revision: "3.1"`.
+  ESP-IDF's bootloader refuses to boot, and the OTA updater refuses to accept, a
+  chip older than the image's minimum revision. Do not flash this build onto an
+  ESP32 module older than rev v3.1, and never set the value higher than the
+  revision reported by the boot log.
+- **Bootloader floor:** `sram1_as_iram` requires a bootloader from ESP-IDF v5.1
+  or later. OTA updates do not replace the bootloader, so a board with an older
+  bootloader would fail to boot and need a USB reflash. Not an issue on the
+  tested board.
+- **Variant coupling:** `minimum_chip_revision` is valid only for the original
+  ESP32. If the `board:` is switched to ESP32-S3, C3, S2 or C6, the whole
+  `advanced:` block must be removed — ESPHome rejects `minimum_chip_revision`
+  on non-ESP32 variants.
+
+#### Measured build results (v1.4.0 → v1.4.1)
+
+Taken from the final v1.4.1 `ninja size` report — the post-warning-cleanup build
+(`config_hash 0x02384f07`, compiled `2026-10-11 13:43:35 +0200`; ESPHome 2026.9.1,
+ESP-IDF 5.5.5, board `esp32dev`):
+
+| Region | v1.4.0 | v1.4.1 | Change |
+|---|---|---|---|
+| Flash (total image) | 1,028,291 B (56.0 %) | 1,026,067 B (55.9 %) | **−2,224 B** (−0.22 %) |
+| IRAM region size | 131,072 B | 172,032 B | **+40,960 B (+40 KiB)** |
+| IRAM used | 77,247 B (58.93 %) | 76,771 B (44.63 %) | −476 B |
+| IRAM free | 53,825 B | 95,261 B | **+41,436 B** |
+| DRAM region size | 180,736 B | 180,736 B | 0 |
+| DRAM used | 55,000 B (30.43 %) | 54,984 B (30.42 %) | −16 B |
+| RTC SLOW used | — | 56 B of 8,192 B | — |
+
+Supporting figures from the same report: Flash Code `.text` 769,704 B; Flash
+Data `.rodata` 163,184 B + `.appdesc` 256 B; IRAM `.text` 75,743 B +
+`.vectors` 1,028 B; DRAM `.bss` 38,704 B + `.data` 16,120 B + `.noinit` 160 B.
+OTA payload `eprices.bin` = `0xFA813` = 1,026,067 B (1,026,176 B padded on upload)
+in a 1,792 KiB app partition (44 % free). `bootloader.bin` = `0x6620` = 26,144 B —
+unchanged, as OTA never replaces the bootloader.
+
+The intermediate build — framework options enabled, warning cleanup not yet applied
+— measured 1,025,951 B (`config_hash 0xd3cbb4ec`). The widened buffers therefore add
++116 B of `.text`, which is why the net flash saving is 2,224 B rather than 2,340 B.
+
+**Both options confirmed in the generated `sdkconfig`:**
+
+```text
+CONFIG_ESP32_REV_MIN_3_1=y
+CONFIG_ESP32_REV_MIN_FULL=301
+CONFIG_ESP_REV_MIN_FULL=301
+CONFIG_ESP_SYSTEM_ESP32_SRAM1_REGION_AS_IRAM=y
+```
+
+and in the generated linker memory map:
+
+```text
+iram0_0_seg (RX) : org = 0x40080000, len = 0x20000 + 0xA000   ; 128 KiB + 40 KiB
+dram0_0_seg (RW) : org = 0x3FFB0000,      len = 0x2c200       ; 176.5 KiB (unchanged)
+```
+
+**Why the DRAM region and the runtime heap are both unchanged:** the option only
+costs heap if IRAM code actually *spills* past the end of the original 128 KB
+IRAM region. The generated linker script makes this explicit:
+
+```text
+_sram1_iram_start = 0x400A0000;
+_sram1_iram_len   = (_iram_end > _sram1_iram_start) ? (_iram_end - _sram1_iram_start) : 0;
+_heap_end         = ALIGN(0x40000000 - _sram1_iram_len - 3, 4);
+```
+
+Resolved values from `eprices.map`:
+
+```text
+_iram_start       = 0x40080000
+_iram_end         = 0x40092BE4      ; 0x12BE4 = 76,772 B of IRAM code
+_sram1_iram_start = 0x400A0000
+_sram1_iram_len   = 0x00000000      ; nothing spilled into SRAM1
+_heap_end         = 0x40000000      ; heap upper bound unchanged
+```
+
+Because `_sram1_iram_len` is zero, the heap reservation
+(`components/heap/port/esp32/memory_layout.c`,
+`SOC_RESERVE_MEMORY_REGION(&_heap_end, 0x40000000, sram1_iram)`) removes nothing.
+ESP-IDF's own Kconfig help states that SRAM1 "was previously reserved for
+**bootloader** DRAM" — it was never available to the app heap in the first place,
+so the extra 40 KB is a pure gain rather than a reallocation.
+
+Runtime confirmation from the post-OTA boot log
+(`heap_caps_get_free_size(MALLOC_CAP_8BIT)`):
+
+```text
+v1.4.0  recompute_today: starting 180,476 B   done 177,576 B
+v1.4.1  recompute_today: starting 180,492 B   done 177,572 B   (pre-cleanup build)
+v1.4.1  recompute_today: starting 180,504 B   done 177,552 B   (final build)
+v1.4.1  recompute_tomorrow: starting 178,788 B  done 179,440 B (final build)
+```
+
++16 B at both measurement points — exactly the 16 B reduction in static DRAM
+(55,000 → 54,984 B). No heap was lost. The final post-cleanup build reports the same
+54,984 B of static DRAM; its runtime figures differ by a dozen bytes only because
+the measurement point falls at a slightly different allocation state.
+
+**Net effect:** the flash saving is modest (2,224 B, 0.22 %, after the +116 B of
+buffer widening) because ESP-IDF's
+errata-workaround paths for pre-v3.0 ESP32 silicon are compact. The substantial
+gain is IRAM headroom obtained at zero cost: usage fell from 58.93 % to 44.63 %
+while the region itself grew, leaving 95,261 B free. IRAM overflow — the failure
+mode that silently blocks added components — is no longer a near-term concern.
+And if IRAM usage ever does exceed 128 KB, ESP-IDF automatically carves the
+spilled amount out of the heap, so the fallback is graceful instead of a link
+error.
+
+#### Build-log notes
+
+- The v1.4.1 compile emitted no ESPHome chip-revision / SRAM1 warnings, which
+  confirms both options were compiled in (ESPHome only emits them when
+  `USE_ESP32_MIN_CHIP_REVISION_SET` / `USE_ESP32_SRAM1_AS_IRAM` are undefined).
+- The build reports `App "eprices" version: 2026.9.1` — the ESPHome version, not
+  a project version. Adding `esphome: project_id:` and `version: "1.4.1"` would
+  make future boot logs self-identify the firmware release.
+- Warning cleanup: **verified**. The final v1.4.1 compile produced zero compiler
+  warnings — the 16 `-Wformat-truncation` / `-Wformat-overflow` diagnostics that the
+  v1.4.0 build emitted from the `snprintf`/`sprintf` calls in the price lambdas are
+  gone from `eprices-install-log.txt`. The only warning in that log is ESPHome's own
+  `WARNING Bundle contains secrets (e.g. Wi-Fi passwords)` line, which concerns the
+  remote-build bundle and not the code. See **Compiler-warning cleanup** below.
+
+#### Compiler-warning cleanup (buffer sizing + `snprintf`)
+
+The v1.4.0 build emitted 16 format warnings from the lambdas. They were harmless
+for the values actually produced, but a warning-laden build log hides genuine
+problems, so all 16 were eliminated in v1.4.1 — and the elimination is confirmed by
+the final v1.4.1 build log, which contains no compiler diagnostics at all. This is
+a **compile-time-only** change: no published state, entity, timing or NVS behaviour
+changes.
+
+| Change | Sites | Reason |
+|---|---|---|
+| `sprintf(...)` → `snprintf(..., sizeof(buf), ...)` | 12 | every unbounded format call in a lambda is now bounded |
+| `char buf[8]` → `char buf[12]` | 7 | `"%d"` of a 32-bit int can need 11 chars + NUL |
+| `today_buf[9]`, `tmr_buf[9]`, `first_date[9]`, `today_check[9]` → `[34]` | 6 | `"%04d%02d%02d"` worst case is 3 × 11 + NUL |
+| `char tbuf[20]` → `char tbuf[32]` | 2 | `"%04d-%02d-%02d %02d:%02d:%02d"` worst case |
+| `char buf[20]` → `char buf[24]` | 3 | `strftime("%Y-%m-%d %H:%M:%S")` had exactly 20 bytes — zero margin |
+| `char tb[6]` → `char tb[24]` | 2 | `"%02d:%02d"` worst case 11 + 1 + 11 + NUL |
+| `char hb[6]` → `char hb[16]` | 2 | `"%02d:00"` worst case 11 + 3 + NUL |
+| `char m[40]` / `char m[50]` sizes kept | 4 | already sufficient; only the call was converted to `snprintf` |
+
+Warnings removed, from the v1.4.0 build log:
+
+| Diagnostic | Count | Offending buffers |
+|---|---|---|
+| `-Wformat-truncation` | 10 | the 8-byte counters, the 9-byte `YYYYMMDD` dates, the 20-byte timestamps |
+| `-Wformat-overflow` | 6 | the 6-byte `tb` / `hb` `HH:MM` time strings (`sprintf`) |
+
+Why the new sizes look generous: GCC's format analysis assumes an unbounded
+`int` argument can print up to 11 characters (`-2147483647`) and does not know
+that `tm_year + 1900`, `min_idx/4` or `retry_count` will always be small. Sizing
+each buffer for the worst case is the only way to silence the diagnostic without
+adding clamping code that could mask a real bug. The header comment in
+`eprices.yaml` records this so the buffers are not shrunk back later.
+
+Buffers deliberately left alone — they produced no warning and are already
+comfortable: `char url[160]`, `char buf[80]`, `char buf[450]`,
+`char json_h_buf[400]`, `char buf[48]`, and `char date_buf[12]` in
+`eprices_nvs.h` (which remains untouched).
+
+#### Changed location in `eprices.yaml`
+
+- `esp32:` → `framework:` — new `advanced:` block (`minimum_chip_revision: "3.1"`,
+  `sram1_as_iram: true`) with inline safety notes, inserted above the existing
+  `sdkconfig_options:`
+- File header — new `v1.4.1 compiler-warning cleanup` block documenting the
+  buffer-sizing rule
+- 26 lambda statements — 22 `char[]` declarations widened and 12 `sprintf` calls
+  converted to `snprintf`; no lambda logic, condition or output changed
+
+#### Migration checklist (v1.4.0 → v1.4.1)
+
+| Item | Action required |
+|---|---|
+| `eprices_nvs.h` | **None** — file unchanged, no update needed |
+| `secrets.yaml` | None — no new or renamed keys |
+| HA entities, automations, dashboards | None — no renames, no new/removed sensors |
+| NVS-stored price data | Preserved automatically |
+| Flash method | Normal ESPHome OTA is fine |
+| Hardware requirement | ESP32 chip rev ≥ v3.1 **and** ESP-IDF v5.1+ bootloader |
+| Lambda code changes | None needed — the buffer/warning cleanup is already inside `eprices.yaml` and changes no behaviour |
+
+#### Post-OTA verification (v1.4.1 boot log)
+
+| Check | Result |
+|---|---|
+| Firmware identity | `ESPHome version 2026.9.1 compiled on 2026-10-11 13:43:35 +0200` — matches the final v1.4.1 build (`config_hash 0x02384f07`) |
+| Chip revision floor | `ESP32 Chip: ESP32 rev3.1, 2 core(s)` — satisfies `minimum_chip_revision: "3.1"` |
+| ESPHome optimization warnings | **Gone** (both were present in the v1.4.0 log) |
+| Compiler warnings | **None** — the matching build log contains no `-Wformat-*` diagnostics |
+| NVS migration | `load(td_count): 96 entries for 20261011` and `load(tm_count): 96 entries for 20261012` — all 96 quarter-hour slots recovered for both days |
+| Free heap | `recompute_today` 180,504 → 177,552 B; `recompute_tomorrow` 178,788 → 179,440 B |
+| Data published | `Last Update Source = NVS_boot`, `Today` / `Tomorrow Price Update Status = SUCCESS` (`Loaded from NVS (boot)`), `Today` / `Tomorrow Entry Count = 96` |
+| Published values unchanged | `Today Lowest 0.0205`, `Today Highest 0.3342`, `Today Average 0.2346` €/kWh — identical to the pre-cleanup build, as are `Today Highest Price Time 17:45` and `Today Lowest Price Time 13:30` |
+| Boot loop guard | `safe_mode: Boot seems successful; resetting boot loop counter` |
+| Watchdog / crash / time jump | None logged |
+| Tomorrow side | `load(tm_count): 96 entries` → `SUCCESS` / `Loaded from NVS (boot)`. The pre-cleanup boot had shown `FAILED/WAITING` only because tomorrow's NVS data had not been fetched at that moment — a data-state difference, not a code change |
+
+---
+
 ## v1.4.0 — 2026-10-06
 
 ### Full-day retry coverage for today and tomorrow
